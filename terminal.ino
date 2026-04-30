@@ -57,7 +57,7 @@ const char* keys[4][4] = {
   { "qwertzuiop", "asdfghjkl", "yxcvbnm", "äöüß" },
   { "QWERTZUIOP", "ASDFGHJKL", "YXCVBNM", "ÄÖÜ" },
   { "1234567890", "-=[]\\;',", "./`~!@#$%", "^&*()_+" },
-  { "{}|:<>?\"", "€£¥§©®™", "°±²³¼½¾", "←↑→↓" }
+  { "{}|:<>?\"", "^&*()_+", "äöüß", "^&*()_+" }
 };
 
 // ==================== CHIP-8 EMULATOR ====================
@@ -90,7 +90,7 @@ private:
   uint8_t scrollX, scrollY;
   
   // SCHIP: Erweiterte Fonts (8x10 für Hi-Res)
-  const uint8_t schipFontset[160] = {
+  const uint8_t schipFontset[180] = {
     // Normale CHIP-8 Fonts (4x5)
     0xF0, 0x90, 0x90, 0x90, 0xF0,  // 0
     0x20, 0x60, 0x20, 0x20, 0x70,  // 1
