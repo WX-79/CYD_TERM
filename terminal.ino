@@ -562,28 +562,21 @@ void qrGeneratorApp() {
   int oldKbMode = kbMode;
   String oldInput = currentInput;
   
-  bool running = true;
   int mode = 0;
   String qrData = "";
   bool qrGenerated = false;
-  int lastMode = -1;
-  bool needsRedraw = true;  // NEU: Nur bei Bedarf neu zeichnen
   
-  while (running) {
+  while (true) {
     int tx, ty;
     bool touchDetected = getTouch(tx, ty);
     
-    // Nur neu zeichnen wenn nötig (nicht bei jedem Loop)
-    if (needsRedraw) {
+    // Vor der QR-Generierung
+    if (!qrGenerated) {
       tft.fillScreen(BG_COLOR);
       
-      // Header
+      // UI Elemente wie gehabt...
       tft.fillRect(0, 35, 240, 30, ACCENT_COLOR);
-      tft.setTextColor(TFT_WHITE);
-      tft.setTextSize(2);
       tft.drawCentreString("QR GENERATOR", 120, 42, 2);
-      
-      // ESC Button
       tft.fillRoundRect(180, 5, 55, 25, 4, WARNING_COLOR);
       tft.drawCentreString("ESC", 207, 10, 2);
       
@@ -593,180 +586,95 @@ void qrGeneratorApp() {
         int x = 10 + i * 55;
         uint16_t color = (mode == i) ? SUCCESS_COLOR : BUTTON_COLOR;
         tft.fillRoundRect(x, 70, 50, 25, 3, color);
-        tft.setTextColor(TEXT_COLOR);
         tft.drawCentreString(modes[i], x + 25, 82, 1);
       }
       
-      // Input Bereich
       tft.fillRoundRect(10, 105, 220, 45, 4, BUTTON_COLOR);
-      tft.setTextSize(1);
-      tft.setTextColor(TFT_CYAN);
       tft.setCursor(15, 115);
+      tft.print(mode == 0 ? "Enter text:" : mode == 1 ? "Enter URL:" : mode == 2 ? "SSID:PWD:" : "Name:Tel:Email:");
       
-      if (mode == 0) tft.print("Enter text (max 200 chars):");
-      else if (mode == 1) tft.print("Enter URL (http://...):");
-      else if (mode == 2) tft.print("SSID:PASSWORD:ENC:");
-      else if (mode == 3) tft.print("Name:Tel:Email:");
-      
-      if (qrData != "") {
-        tft.setTextColor(TFT_GREEN);
-        tft.setCursor(15, 130);
-        String display = qrData;
-        if (display.length() > 28) display = display.substring(0, 25) + "...";
-        tft.print(display);
-      } else {
-        tft.setTextColor(TFT_DARKGREY);
-        tft.setCursor(15, 130);
-        tft.print("No data entered yet");
-      }
-      
-      // Generate Button
-      if (!qrGenerated) {
-        tft.fillRoundRect(10, 160, 100, 30, 4, SUCCESS_COLOR);
-        tft.drawCentreString("GENERATE", 60, 175, 1);
-      }
-      
-      // Save Button
-      if (qrGenerated && qrData != "") {
-        tft.fillRoundRect(120, 160, 100, 30, 4, TFT_BLUE);
-        tft.drawCentreString("SAVE", 170, 175, 1);
-      }
-      
-      // QR Code Anzeige Bereich
+      tft.fillRoundRect(10, 160, 100, 30, 4, SUCCESS_COLOR);
+      tft.drawCentreString("GENERATE", 60, 175, 1);
       tft.drawRect(35, 200, 170, 170, TEXT_COLOR);
       
-      needsRedraw = false;
+      if (touchDetected) {
+        if (tx > 180 && ty < 40) break;
+        
+        for (int i = 0; i < 4; i++) {
+          int x = 10 + i * 55;
+          if (ty > 70 && ty < 95 && tx > x && tx < x + 50) {
+            mode = i;
+            qrData = "";
+            playSysSound(0);
+          }
+        }
+        
+        if (tx < 110 && ty > 160 && ty < 190) {
+          printToConsole(infoPrefix + "Enter data:", TFT_BLUE);
+          
+          if (mode == 0) qrData = getTextInput();
+          else if (mode == 1) {
+            qrData = getTextInput();
+            if (!qrData.startsWith("http")) qrData = "http://" + qrData;
+          } else if (mode == 2) {
+            printToConsole(infoPrefix + "Enter SSID:", TFT_BLUE);
+            String ssid = getTextInput();
+            printToConsole(infoPrefix + "Enter password:", TFT_BLUE);
+            String pwd = getTextInput();
+            qrData = "WIFI:S:" + ssid + ";T:WPA;P:" + pwd + ";;";
+          } else if (mode == 3) {
+            printToConsole(infoPrefix + "Enter name:", TFT_BLUE);
+            String name = getTextInput();
+            printToConsole(infoPrefix + "Enter phone:", TFT_BLUE);
+            String phone = getTextInput();
+            printToConsole(infoPrefix + "Enter email:", TFT_BLUE);
+            String email = getTextInput();
+            qrData = "BEGIN:VCARD\nVERSION:3.0\nFN:" + name + "\nTEL:" + phone + "\nEMAIL:" + email + "\nEND:VCARD";
+          }
+          
+          if (qrData != "") {
+            qrGenerated = true;
+            playSysSound(1);
+          }
+        }
+      }
     }
     
-    // QR-Code separat zeichnen (ohne den Rest zu löschen)
-    if (qrGenerated && qrData != "") {
-      // Nur den QR-Code Bereich löschen und neu zeichnen
-      tft.fillRect(36, 201, 168, 168, BG_COLOR);
-      tft.drawRect(35, 200, 170, 170, TEXT_COLOR);
+    // QR-Code wird EINMAL generiert und angezeigt
+    else {
+      // Bildschirm komplett löschen
+      tft.fillScreen(BG_COLOR);
       
+      // Header
+      tft.fillRect(0, 35, 240, 30, ACCENT_COLOR);
+      tft.setTextColor(TFT_WHITE);
+      tft.setTextSize(2);
+      tft.drawCentreString("QR CODE", 120, 42, 2);
+      
+      // ESC Button (einzige Möglichkeit)
+      tft.fillRoundRect(180, 5, 55, 25, 4, WARNING_COLOR);
+      tft.drawCentreString("ESC", 207, 10, 2);
+      
+      // QR-Code Bereich
+      tft.drawRect(35, 80, 170, 170, TEXT_COLOR);
+      
+      // QR-Code NUR EINMAL hier generieren!
       QRcode_eSPI qrcode(&tft);
       qrcode.init();
       qrcode.create(qrData);
-    } else if (!qrGenerated) {
-      // Platzhalter anzeigen (nur wenn kein QR)
-      tft.fillRect(36, 201, 168, 168, BG_COLOR);
-      tft.drawRect(35, 200, 170, 170, TEXT_COLOR);
-      tft.setTextSize(1);
-      tft.setTextColor(TFT_DARKGREY);
-      tft.drawCentreString("QR Code", 120, 270, 2);
-      tft.drawCentreString("will appear here", 120, 290, 1);
-      tft.drawCentreString("after pressing", 120, 305, 1);
-      tft.drawCentreString("GENERATE", 120, 320, 1);
-    }
-    
-    // Touch Handling
-    if (touchDetected) {
-      // ESC Button
-      if (tx > 180 && ty < 40) {
-        running = false;
-      }
-      // Modus Auswahl
-      else if (ty > 70 && ty < 95) {
-        for (int i = 0; i < 4; i++) {
-          int x = 10 + i * 55;
-          if (tx > x && tx < x + 50) {
-            if (mode != i) {
-              mode = i;
-              qrData = "";
-              qrGenerated = false;
-              needsRedraw = true;  // Komplett neu zeichnen
-              playSysSound(0);
-            }
-            break;
+      
+      // Jetzt nur noch auf ESC warten - keine weiteren Aktionen
+      while (true) {
+        if (getTouch(tx, ty)) {
+          if (tx > 180 && ty < 40) {
+            break;  // ESC gedrückt - App beenden
           }
+          // Alle anderen Berührungen werden komplett ignoriert!
         }
+        delay(20);
       }
-      // GENERATE Button
-      else if (!qrGenerated && tx < 110 && ty > 160 && ty < 190) {
-        printToConsole(infoPrefix + "Enter data:", TFT_BLUE);
-        
-        String newData = "";
-        if (mode == 0) {
-          newData = getTextInput();
-        } else if (mode == 1) {
-          newData = getTextInput();
-          if (!newData.startsWith("http")) newData = "http://" + newData;
-        } else if (mode == 2) {
-          printToConsole(infoPrefix + "Enter SSID:", TFT_BLUE);
-          String ssid = getTextInput();
-          printToConsole(infoPrefix + "Enter password:", TFT_BLUE);
-          String pwd = getTextInput();
-          newData = "WIFI:S:" + ssid + ";T:WPA;P:" + pwd + ";;";
-        } else if (mode == 3) {
-          printToConsole(infoPrefix + "Enter name:", TFT_BLUE);
-          String name = getTextInput();
-          printToConsole(infoPrefix + "Enter phone:", TFT_BLUE);
-          String phone = getTextInput();
-          printToConsole(infoPrefix + "Enter email:", TFT_BLUE);
-          String email = getTextInput();
-          newData = "BEGIN:VCARD\nVERSION:3.0\nFN:" + name + "\nTEL:" + phone + "\nEMAIL:" + email + "\nEND:VCARD";
-        }
-        
-        if (newData != "") {
-          qrData = newData;
-          qrGenerated = true;
-          needsRedraw = true;  // Neu zeichnen mit QR-Code
-          playSysSound(1);
-          printToConsole(successPrefix + "QR Code generated!", TFT_GREEN);
-        }
-      }
-      // SAVE Button
-      else if (qrGenerated && tx > 120 && ty > 160 && ty < 190 && qrData != "") {
-        String filename = "/qr_" + String(millis()) + ".txt";
-        File f = SD.open(filename, FILE_WRITE);
-        if (f) {
-          f.println(qrData);
-          f.close();
-          printToConsole(successPrefix + "QR data saved to " + filename, TFT_GREEN);
-          playSysSound(1);
-        } else {
-          printToConsole(errorPrefix + "Save failed!", TFT_RED);
-        }
-        delay(500);
-      }
-      // NEU: Bildschirm antippen zum Zurücksetzen (optional)
-      else if (qrGenerated && qrData != "") {
-        // Nur wenn außerhalb aller Buttons
-        if (!(tx > 180 && ty < 40) && 
-            !(ty > 70 && ty < 95) &&
-            !(ty > 160 && ty < 190)) {
-          
-          // Optional: Bestätigungsdialog
-          tft.fillRect(0, 0, 240, 320, BG_COLOR);
-          tft.fillRoundRect(30, 100, 180, 120, 8, BUTTON_COLOR);
-          tft.setTextSize(1);
-          tft.setTextColor(TEXT_COLOR);
-          tft.drawCentreString("Create new QR code?", 120, 120, 2);
-          tft.drawCentreString("Current data will be lost", 120, 140, 1);
-          
-          tft.fillRoundRect(50, 170, 60, 30, 4, SUCCESS_COLOR);
-          tft.drawCentreString("YES", 80, 182, 2);
-          tft.fillRoundRect(130, 170, 60, 30, 4, WARNING_COLOR);
-          tft.drawCentreString("NO", 160, 182, 2);
-          
-          bool waiting = true;
-          while (waiting) {
-            if (getTouch(tx, ty)) {
-              if (tx > 50 && tx < 110 && ty > 170 && ty < 200) {
-                qrData = "";
-                qrGenerated = false;
-                needsRedraw = true;
-                waiting = false;
-                playSysSound(0);
-              } else if (tx > 130 && tx < 190 && ty > 170 && ty < 200) {
-                waiting = false;
-                playSysSound(0);
-              }
-            }
-            delay(50);
-          }
-        }
-      }
+      
+      break;  // Aus der Hauptschleife
     }
     
     delay(20);
