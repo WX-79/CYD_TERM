@@ -1,6 +1,6 @@
 CYTos: Cheap Yellow Terminal Operating System
 
-### this is the oficial repository for the CYTos
+### this is the oficial repository for the CYTos (mainely codet with AI)
 
 It contains many features, such as:
 - CHIP-8 Emulator
