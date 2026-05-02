@@ -46,3 +46,10 @@ If you want to contribute or improve the system, here are some ideas:
 
 ### Contribution Guidelines
 Feel free to do whatever you want with the code. If possible, try to keep everything compatible with older releases—or don't, I don't mind! It is just a request.
+
+
+![Reference](/image0.jpg)
+![Reference](/image1.jpg)
+![Reference](/image2.jpg)
+![Reference](/image3.jpg)
+![Reference](/image4.jpg)
