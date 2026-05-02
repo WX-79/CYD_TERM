@@ -6,11 +6,22 @@
 #include <WebServer.h>
 #include <vector>
 #include <EEPROM.h>
-#include <FS.h>
 #include <time.h>
 #include <Wire.h>
 #include <TimeLib.h>
 #include <qrcode_espi.h>
+
+#define MAX_SAVED_WIFIS 5
+#define WIFI_EEPROM_START 150
+#define WIFI_EEPROM_SIZE 256
+
+struct SavedWiFi {
+  String ssid;
+  String password;
+  bool valid;
+};
+
+SavedWiFi savedNetworks[MAX_SAVED_WIFIS];
 
 struct CalendarNote {
   int year, month, day;
@@ -506,8 +517,7 @@ int highScore = 0;
 char board[3][3];
 bool playerTurn = true;
 int gameMode = 0;
-std::vector<String> notes;
-int selectedNote = -1;
+
 
 // ==================== FORWARD DEKLARATIONEN ====================
 void updateInputLine(bool force = false);
@@ -522,7 +532,6 @@ void snakeGame();
 void pongGame();
 void ticTacToe();
 void drawingApp();
-void notesApp();
 void todoApp();
 void timerApp();
 void chatApp(bool isHost);
@@ -545,15 +554,478 @@ String evaluateScientific(String expr);
 String evaluateProgrammer(String expr);
 long parseNumber(String num);
 
+// ==================== WIFI DATEIVERWALTUNG MIT PASSWORT ====================
+// ==================== CAESAR VERSCHLÜSSELUNG (BIDIREKTIONAL) ====================
+
+// Verschlüsselung mit symmetrischer Caesar-Methode
+
+
+// Passwort speichern (verschlüsselt)
+
+
+// ==================== WEB SERVER DATEIVERWALTUNG ====================
+
+WebServer fileServer(8080);  // Port 8080 für Dateiverwaltung
+bool fileServerRunning = false;
+String adminPassword = "";
+bool isAuthenticated = false;
+unsigned long authTimeout = 0;
+
+// HTML Login Seite
+String getLoginPage() {
+  String html = "<!DOCTYPE html><html><head>";
+  html += "<meta charset='UTF-8'>";
+  html += "<meta name='viewport' content='width=device-width, initial-scale=1.0'>";
+  html += "<title>CYD File Manager Login</title>";
+  html += "<style>";
+  html += "body{font-family:Arial;background:#1a1a2e;display:flex;justify-content:center;align-items:center;height:100vh;margin:0}";
+  html += ".login{background:#16213e;padding:40px;border-radius:10px;box-shadow:0 0 20px rgba(0,0,0,0.5)}";
+  html += "h2{color:#0f3460;text-align:center}";
+  html += "input{width:100%;padding:12px;margin:10px 0;border:none;border-radius:5px;background:#0f3460;color:#fff}";
+  html += "button{width:100%;padding:12px;background:#e94560;border:none;border-radius:5px;color:#fff;cursor:pointer}";
+  html += "button:hover{background:#ff6b6b}";
+  html += "</style></head><body>";
+  html += "<div class='login'><h2>🔐 CYD File Manager</h2>";
+  html += "<form method='POST' action='/login'>";
+  html += "<input type='password' name='password' placeholder='Admin Password' autofocus>";
+  html += "<button type='submit'>Login</button>";
+  html += "</form></div></body></html>";
+  return html;
+}
+
+// HTML File Manager Hauptseite
+String getFileManagerPage(String currentPath = "/") {
+  String html = "<!DOCTYPE html><html><head>";
+  html += "<meta charset='UTF-8'>";
+  html += "<meta name='viewport' content='width=device-width, initial-scale=1.0'>";
+  html += "<title>CYD File Manager</title>";
+  html += "<style>";
+  html += "*{box-sizing:border-box}";
+  html += "body{font-family:'Segoe UI',Arial;background:#0a0a0a;margin:0;padding:20px;color:#eee}";
+  html += ".container{max-width:1200px;margin:0 auto}";
+  html += ".header{background:#1e1e2e;padding:15px;border-radius:10px;margin-bottom:20px}";
+  html += ".header h1{color:#e94560;margin:0}";
+  html += ".path{background:#2a2a3a;padding:10px;border-radius:5px;margin:10px 0;word-break:break-all}";
+  html += ".tools{display:flex;gap:10px;flex-wrap:wrap;margin-bottom:20px}";
+  html += ".btn{background:#3a3a4a;padding:10px 20px;border:none;border-radius:5px;color:#fff;cursor:pointer;text-decoration:none;display:inline-block}";
+  html += ".btn-primary{background:#e94560}";
+  html += ".btn-success{background:#27ae60}";
+  html += ".btn-danger{background:#c0392b}";
+  html += ".btn-warning{background:#f39c12}";
+  html += ".btn-info{background:#3498db}";
+  html += ".file-list{background:#1e1e2e;border-radius:10px;overflow:hidden}";
+  html += ".file-item{display:flex;justify-content:space-between;align-items:center;padding:12px 15px;border-bottom:1px solid #2a2a3a}";
+  html += ".file-item:hover{background:#2a2a3a}";
+  html += ".file-name{flex:2;word-break:break-all}";
+  html += ".file-size{flex:0.5;text-align:right;color:#888}";
+  html += ".file-actions{flex:1;display:flex;gap:5px;justify-content:flex-end}";
+  html += ".file-actions button{background:#3a3a4a;border:none;padding:5px 10px;border-radius:3px;color:#fff;cursor:pointer}";
+  html += ".dir{color:#3498db;font-weight:bold}";
+  html += ".upload-area{border:2px dashed #3a3a4a;border-radius:10px;padding:20px;text-align:center;margin-top:20px}";
+  html += ".status{position:fixed;bottom:20px;right:20px;background:#27ae60;padding:10px 20px;border-radius:5px;display:none}";
+  html += "input,select{padding:10px;margin:5px;border-radius:5px;border:none;background:#2a2a3a;color:#fff}";
+  html += "@media (max-width:768px){.file-item{flex-wrap:wrap}.file-actions{margin-top:10px;width:100%}}";
+  html += "</style>";
+  html += "<script>";
+  html += "function showStatus(msg,isError){";
+  html += "var s=document.getElementById('status');s.innerHTML=msg;s.style.backgroundColor=isError?'#c0392b':'#27ae60';s.style.display='block';";
+  html += "setTimeout(function(){s.style.display='none';},3000);}";
+  html += "function renameItem(oldName){";
+  html += "var newName=prompt('New name:',oldName.split('/').pop());";
+  html += "if(newName){fetch('/rename?old='+encodeURIComponent(oldName)+'&new='+encodeURIComponent(newName)).then(r=>r.text()).then(t=>{showStatus(t);location.reload();});}}";
+  html += "function moveItem(path){";
+  html += "var dest=prompt('Destination path (e.g., /folder/):','/');";
+  html += "if(dest){fetch('/move?src='+encodeURIComponent(path)+'&dst='+encodeURIComponent(dest)).then(r=>r.text()).then(t=>{showStatus(t);location.reload();});}}";
+  html += "function copyItem(path){";
+  html += "var dest=prompt('Destination path (e.g., /folder/):','/');";
+  html += "if(dest){fetch('/copy?src='+encodeURIComponent(path)+'&dst='+encodeURIComponent(dest)).then(r=>r.text()).then(t=>{showStatus(t);location.reload();});}}";
+  html += "function deleteItem(path){";
+  html += "if(confirm('Delete '+path+'?')){fetch('/delete?path='+encodeURIComponent(path)).then(r=>r.text()).then(t=>{showStatus(t);location.reload();});}}";
+  html += "function createFolder(){";
+  html += "var name=prompt('Folder name:');";
+  html += "if(name){fetch('/mkdir?name='+encodeURIComponent(name)).then(r=>r.text()).then(t=>{showStatus(t);location.reload();});}}";
+  html += "</script>";
+  html += "</head><body>";
+  html += "<div class='container'>";
+  html += "<div class='header'>";
+  html += "<h1>📁 CYD File Manager</h1>";
+  html += "<div class='path'>📍 Current: " + currentPath + "</div>";
+  html += "</div>";
+
+  // Tools
+  html += "<div class='tools'>";
+  html += "<a href='/logout' class='btn btn-danger'>🚪 Logout</a>";
+  html += "<button class='btn btn-warning' onclick='createFolder()'>📁 New Folder</button>";
+  html += "<button class='btn btn-info' onclick=\"window.location.href='/upload'\">📤 Upload File</button>";
+  html += "<button class='btn' onclick=\"window.location.reload()\">🔄 Refresh</button>";
+  html += "</div>";
+
+  // Dateiliste
+  html += "<div class='file-list'>";
+
+  // Parent directory Link
+  if (currentPath != "/") {
+    String parentPath = currentPath.substring(0, currentPath.lastIndexOf('/'));
+    if (parentPath == "") parentPath = "/";
+    html += "<div class='file-item'>";
+    html += "<div class='file-name'><a href='/?path=" + urlEncode(parentPath) + "' style='color:#e94560;text-decoration:none;'>📂 .. (Parent)</a></div>";
+    html += "<div class='file-size'></div>";
+    html += "<div class='file-actions'></div>";
+    html += "</div>";
+  }
+
+  // Dateien und Ordner auflisten
+  std::vector<String> dirs, files;
+  listDirectory(currentPath, files, dirs);
+
+  // Ordner zuerst
+  for (String dir : dirs) {
+    String fullPath = currentPath;
+    if (fullPath == "/") fullPath = "/" + dir;
+    else fullPath = currentPath + "/" + dir;
+    fullPath.replace("//", "/");
+
+    html += "<div class='file-item'>";
+    html += "<div class='file-name dir'>📁 <a href='/?path=" + urlEncode(fullPath) + "' style='color:#3498db;text-decoration:none;'>" + dir + "</a></div>";
+    html += "<div class='file-size'></div>";
+    html += "<div class='file-actions'>";
+    html += "<button onclick='renameItem(\"" + fullPath + "\")'>✏️</button>";
+    html += "<button onclick='moveItem(\"" + fullPath + "\")'>📦</button>";
+    html += "<button onclick='copyItem(\"" + fullPath + "\")'>📋</button>";
+    html += "<button onclick='deleteItem(\"" + fullPath + "\")' style='background:#c0392b'>🗑️</button>";
+    html += "</div></div>";
+  }
+
+  // Dateien danach
+  for (String file : files) {
+    String fullPath = currentPath;
+    if (fullPath == "/") fullPath = "/" + file;
+    else fullPath = currentPath + "/" + file;
+    fullPath.replace("//", "/");
+
+    File f = SD.open(fullPath);
+    String fileSize = "";
+    if (f) {
+      int sz = f.size();
+      if (sz < 1024) fileSize = String(sz) + " B";
+      else if (sz < 1024 * 1024) fileSize = String(sz / 1024) + " KB";
+      else fileSize = String(sz / (1024 * 1024)) + " MB";
+      f.close();
+    }
+
+    html += "<div class='file-item'>";
+    html += "<div class='file-name'>📄 " + file + "</div>";
+    html += "<div class='file-size'>" + fileSize + "</div>";
+    html += "<div class='file-actions'>";
+    html += "<button onclick=\"window.location.href='/download?file=" + urlEncode(fullPath) + "'\">⬇️</button>";
+    html += "<button onclick='renameItem(\"" + fullPath + "\")'>✏️</button>";
+    html += "<button onclick='moveItem(\"" + fullPath + "\")'>📦</button>";
+    html += "<button onclick='copyItem(\"" + fullPath + "\")'>📋</button>";
+    html += "<button onclick='deleteItem(\"" + fullPath + "\")' style='background:#c0392b'>🗑️</button>";
+    html += "</div></div>";
+  }
+
+  if (dirs.size() == 0 && files.size() == 0) {
+    html += "<div style='text-align:center;padding:40px;color:#888'>📂 Empty directory</div>";
+  }
+
+  html += "</div>";
+
+  // Upload Bereich
+  html += "<div class='upload-area'>";
+  html += "<form action='/upload' method='POST' enctype='multipart/form-data'>";
+  html += "<input type='file' name='file' required>";
+  html += "<input type='hidden' name='path' value='" + currentPath + "'>";
+  html += "<button type='submit' class='btn btn-success'>📤 Upload to current folder</button>";
+  html += "</form>";
+  html += "</div>";
+
+  html += "<div id='status' class='status'></div>";
+  html += "</div></body></html>";
+
+  return html;
+}
+
+// URL Encoder für Pfade
+String urlEncode(String str) {
+  String encoded = "";
+  for (int i = 0; i < str.length(); i++) {
+    char c = str[i];
+    if (c == ' ') encoded += "%20";
+    else if (c == '/') encoded += "/";
+    else if ((c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9')) encoded += c;
+    else if (c == '.') encoded += ".";
+    else if (c == '-') encoded += "-";
+    else if (c == '_') encoded += "_";
+    else {
+      char hex[4];
+      sprintf(hex, "%%%02X", (unsigned char)c);
+      encoded += hex;
+    }
+  }
+  return encoded;
+}
+
+// ==================== WEB ROUTES ====================
+
+void handleFileManagerRoot() {
+  if (!checkAuth()) return;
+
+  String path = "/";
+  if (server.hasArg("path")) {
+    path = server.arg("path");
+  }
+
+  String html = getFileManagerPage(path);
+  server.send(200, "text/html", html);
+}
+
+void handleLogin() {
+  if (server.hasArg("password")) {
+    String pwd = server.arg("password");
+    if (pwd == adminPassword) {
+      isAuthenticated = true;
+      authTimeout = millis() + 3600000;  // 1 Stunde gültig
+      server.sendHeader("Location", "/", true);
+      server.send(302, "text/plain", "");
+      return;
+    }
+  }
+  server.send(200, "text/html", getLoginPage());
+}
+
+void handleLogout() {
+  isAuthenticated = false;
+  server.sendHeader("Location", "/login", true);
+  server.send(302, "text/plain", "");
+}
+
+void handleDownload() {
+  if (!checkAuth()) return;
+
+  if (server.hasArg("file")) {
+    String filepath = server.arg("file");
+    if (SD.exists(filepath)) {
+      File file = SD.open(filepath, FILE_READ);
+      if (file) {
+        server.streamFile(file, "application/octet-stream");
+        file.close();
+        return;
+      }
+    }
+  }
+  server.send(404, "text/plain", "File not found");
+}
+
+void handleUpload() {
+  if (!checkAuth()) return;
+
+  HTTPUpload& upload = server.upload();
+  static File uploadFile;
+  static String uploadPath;
+
+  if (upload.status == UPLOAD_FILE_START) {
+    String destPath = "/";
+    if (server.hasArg("path")) {
+      destPath = server.arg("path");
+    }
+    String filename = upload.filename;
+    uploadPath = destPath;
+    if (uploadPath == "/") uploadPath = "/" + filename;
+    else uploadPath = uploadPath + "/" + filename;
+    uploadPath.replace("//", "/");
+
+    uploadFile = SD.open(uploadPath, FILE_WRITE);
+  } else if (upload.status == UPLOAD_FILE_WRITE && uploadFile) {
+    uploadFile.write(upload.buf, upload.currentSize);
+  } else if (upload.status == UPLOAD_FILE_END && uploadFile) {
+    uploadFile.close();
+    server.sendHeader("Location", "/?path=" + urlEncode(uploadPath.substring(0, uploadPath.lastIndexOf('/'))), true);
+    server.send(302, "text/plain", "");
+    return;
+  }
+
+  if (!uploadFile && upload.status != UPLOAD_FILE_END) {
+    server.send(500, "text/plain", "Upload failed");
+  }
+}
+
+void handleDelete() {
+  if (!checkAuth()) return;
+
+  if (server.hasArg("path")) {
+    String path = server.arg("path");
+    deleteFileOrDir(path);
+    server.send(200, "text/plain", "Deleted: " + path);
+  } else {
+    server.send(400, "text/plain", "Missing path");
+  }
+}
+
+void handleRename() {
+  if (!checkAuth()) return;
+
+  if (server.hasArg("old") && server.hasArg("new")) {
+    String oldPath = server.arg("old");
+    String newName = server.arg("new");
+    String newPath = oldPath.substring(0, oldPath.lastIndexOf('/') + 1) + newName;
+
+    if (SD.rename(oldPath, newPath)) {
+      server.send(200, "text/plain", "Renamed to " + newName);
+    } else {
+      server.send(500, "text/plain", "Rename failed");
+    }
+  } else {
+    server.send(400, "text/plain", "Missing parameters");
+  }
+}
+
+void handleMove() {
+  if (!checkAuth()) return;
+
+  if (server.hasArg("src") && server.hasArg("dst")) {
+    String src = server.arg("src");
+    String dstDir = server.arg("dst");
+    String filename = src.substring(src.lastIndexOf('/') + 1);
+    String dst = dstDir;
+    if (dst.endsWith("/")) dst += filename;
+    else dst += "/" + filename;
+    dst.replace("//", "/");
+
+    if (SD.rename(src, dst)) {
+      server.send(200, "text/plain", "Moved to " + dst);
+    } else {
+      server.send(500, "text/plain", "Move failed");
+    }
+  } else {
+    server.send(400, "text/plain", "Missing parameters");
+  }
+}
+
+void handleCopy() {
+  if (!checkAuth()) return;
+
+  if (server.hasArg("src") && server.hasArg("dst")) {
+    String src = server.arg("src");
+    String dstDir = server.arg("dst");
+    String filename = src.substring(src.lastIndexOf('/') + 1);
+    String dst = dstDir;
+    if (dst.endsWith("/")) dst += filename;
+    else dst += "/" + filename;
+    dst.replace("//", "/");
+
+    copyFileItem(src, dst);
+    server.send(200, "text/plain", "Copied to " + dst);
+  } else {
+    server.send(400, "text/plain", "Missing parameters");
+  }
+}
+
+void handleMkdir() {
+  if (!checkAuth()) return;
+
+  String currentPath = "/";
+  if (server.hasArg("path")) {
+    currentPath = server.arg("path");
+  }
+
+  if (server.hasArg("name")) {
+    String dirName = server.arg("name");
+    String fullPath = currentPath;
+    if (fullPath == "/") fullPath = "/" + dirName;
+    else fullPath = currentPath + "/" + dirName;
+    fullPath.replace("//", "/");
+
+    if (SD.mkdir(fullPath)) {
+      server.send(200, "text/plain", "Created folder: " + dirName);
+    } else {
+      server.send(500, "text/plain", "Failed to create folder");
+    }
+  } else {
+    server.send(400, "text/plain", "Missing folder name");
+  }
+}
+
+bool checkAuth() {
+  if (!isAuthenticated || (authTimeout > 0 && millis() > authTimeout)) {
+    isAuthenticated = false;
+    server.sendHeader("Location", "/login", true);
+    server.send(302, "text/plain", "");
+    return false;
+  }
+  return true;
+}
+
+// ==================== START FILE SERVER ====================
+void startFileServer() {
+  if (fileServerRunning) {
+    printToConsole(infoPrefix + "File server already running on port 8080", TFT_YELLOW);
+    return;
+  }
+
+  // Passwort laden
+  adminPassword = loadAdminPassword();
+  if (adminPassword == "") {
+    printToConsole(errorPrefix + "No admin password found in /psw_admin.txt!", TFT_RED);
+    printToConsole(infoPrefix + "Creating default password: admin123", TFT_BLUE);
+    adminPassword = "admin123";
+    saveAdminPassword(adminPassword);
+    printToConsole(successPrefix + "Default password created: admin123", TFT_GREEN);
+  }
+
+  // Falls noch kein Passwort da ist, Default setzen
+  if (adminPassword.length() == 0) {
+    adminPassword = "admin123";
+    saveAdminPassword(adminPassword);
+  }
+
+  printToConsole(infoPrefix + "Admin password loaded (encrypted)", TFT_GREEN);
+
+  // Routes registrieren
+  fileServer.on("/", handleFileManagerRoot);
+  fileServer.on("/login", HTTP_GET, handleLogin);
+  fileServer.on("/login", HTTP_POST, handleLogin);
+  fileServer.on("/logout", handleLogout);
+  fileServer.on("/download", handleDownload);
+  fileServer.on("/delete", handleDelete);
+  fileServer.on("/rename", handleRename);
+  fileServer.on("/move", handleMove);
+  fileServer.on("/copy", handleCopy);
+  fileServer.on("/mkdir", handleMkdir);
+  fileServer.on("/upload", HTTP_POST, handleUpload, handleUpload);
+
+  fileServer.begin();
+  fileServerRunning = true;
+
+  printToConsole(successPrefix + "File Server started on port 8080", TFT_GREEN);
+  printToConsole(infoPrefix + "Access via: http://" + WiFi.localIP().toString() + ":8080", TFT_BLUE);
+  printToConsole(infoPrefix + "Password: " + adminPassword, TFT_YELLOW);
+}
+
+void stopFileServer() {
+  if (!fileServerRunning) return;
+  fileServer.stop();
+  fileServerRunning = false;
+  printToConsole(infoPrefix + "File server stopped", TFT_YELLOW);
+}
+
+void handleFileServer() {
+  if (fileServerRunning) {
+    fileServer.handleClient();
+  }
+}
+
+
+
 QRcode_eSPI qrcode(&tft);  // Korrekter Klassenname
 void createQRCode(String data, int size, int xOffset, int yOffset) {
   QRcode_eSPI qrcode(&tft);
   qrcode.init();
-  
+
   // Die create() Methode erzeugt den QR-Code automatisch in der richtigen Größe
   // Die Skalierung wird bei dieser Bibliothek nicht separat gesetzt
   qrcode.create(data);
-  
+
   // Die display-Methode ist privat - stattdessen wird der QR-Code automatisch angezeigt
   // Der QR-Code wird nach create() automatisch auf dem Display gezeichnet
 }
@@ -561,45 +1033,47 @@ void createQRCode(String data, int size, int xOffset, int yOffset) {
 void qrGeneratorApp() {
   int oldKbMode = kbMode;
   String oldInput = currentInput;
-  
+
   int mode = 0;
   String qrData = "";
   bool qrGenerated = false;
-  
+
   while (true) {
     int tx, ty;
     bool touchDetected = getTouch(tx, ty);
-    
+
     // Vor der QR-Generierung
     if (!qrGenerated) {
       tft.fillScreen(BG_COLOR);
-      
+
       // UI Elemente wie gehabt...
       tft.fillRect(0, 35, 240, 30, ACCENT_COLOR);
       tft.drawCentreString("QR GENERATOR", 120, 42, 2);
       tft.fillRoundRect(180, 5, 55, 25, 4, WARNING_COLOR);
       tft.drawCentreString("ESC", 207, 10, 2);
-      
+
       // Modus Buttons
-      const char* modes[] = {"TEXT", "URL", "WIFI", "VCARD"};
+      const char* modes[] = { "TEXT", "URL", "WIFI", "VCARD" };
       for (int i = 0; i < 4; i++) {
         int x = 10 + i * 55;
         uint16_t color = (mode == i) ? SUCCESS_COLOR : BUTTON_COLOR;
         tft.fillRoundRect(x, 70, 50, 25, 3, color);
         tft.drawCentreString(modes[i], x + 25, 82, 1);
       }
-      
+
       tft.fillRoundRect(10, 105, 220, 45, 4, BUTTON_COLOR);
       tft.setCursor(15, 115);
-      tft.print(mode == 0 ? "Enter text:" : mode == 1 ? "Enter URL:" : mode == 2 ? "SSID:PWD:" : "Name:Tel:Email:");
-      
+      tft.print(mode == 0 ? "Enter text:" : mode == 1 ? "Enter URL:"
+                                          : mode == 2 ? "SSID:PWD:"
+                                                      : "Name:Tel:Email:");
+
       tft.fillRoundRect(10, 160, 100, 30, 4, SUCCESS_COLOR);
       tft.drawCentreString("GENERATE", 60, 175, 1);
       tft.drawRect(35, 200, 170, 170, TEXT_COLOR);
-      
+
       if (touchDetected) {
         if (tx > 180 && ty < 40) break;
-        
+
         for (int i = 0; i < 4; i++) {
           int x = 10 + i * 55;
           if (ty > 70 && ty < 95 && tx > x && tx < x + 50) {
@@ -608,10 +1082,10 @@ void qrGeneratorApp() {
             playSysSound(0);
           }
         }
-        
+
         if (tx < 110 && ty > 160 && ty < 190) {
           printToConsole(infoPrefix + "Enter data:", TFT_BLUE);
-          
+
           if (mode == 0) qrData = getTextInput();
           else if (mode == 1) {
             qrData = getTextInput();
@@ -631,7 +1105,7 @@ void qrGeneratorApp() {
             String email = getTextInput();
             qrData = "BEGIN:VCARD\nVERSION:3.0\nFN:" + name + "\nTEL:" + phone + "\nEMAIL:" + email + "\nEND:VCARD";
           }
-          
+
           if (qrData != "") {
             qrGenerated = true;
             playSysSound(1);
@@ -639,30 +1113,30 @@ void qrGeneratorApp() {
         }
       }
     }
-    
+
     // QR-Code wird EINMAL generiert und angezeigt
     else {
       // Bildschirm komplett löschen
       tft.fillScreen(BG_COLOR);
-      
+
       // Header
       tft.fillRect(0, 35, 240, 30, ACCENT_COLOR);
       tft.setTextColor(TFT_WHITE);
       tft.setTextSize(2);
       tft.drawCentreString("QR CODE", 120, 42, 2);
-      
+
       // ESC Button (einzige Möglichkeit)
       tft.fillRoundRect(180, 5, 55, 25, 4, WARNING_COLOR);
       tft.drawCentreString("ESC", 207, 10, 2);
-      
+
       // QR-Code Bereich
       tft.drawRect(35, 80, 170, 170, TEXT_COLOR);
-      
+
       // QR-Code NUR EINMAL hier generieren!
       QRcode_eSPI qrcode(&tft);
       qrcode.init();
       qrcode.create(qrData);
-      
+
       // Jetzt nur noch auf ESC warten - keine weiteren Aktionen
       while (true) {
         if (getTouch(tx, ty)) {
@@ -673,307 +1147,12 @@ void qrGeneratorApp() {
         }
         delay(20);
       }
-      
+
       break;  // Aus der Hauptschleife
     }
-    
+
     delay(20);
   }
-  
-  kbMode = oldKbMode;
-  currentInput = oldInput;
-  tft.fillScreen(BG_COLOR);
-  drawKeyboard();
-  drawScrollButtons();
-  refreshTerminal();
-  updateInputLine(true);
-}
-
-// ==================== KALENDER MIT NOTIZEN ====================
-
-std::vector<CalendarNote> calendarNotes;
-int currentYear = 2024;
-int currentMonth = 1;
-int currentDay = 1;
-
-// ==================== KALENDER NOTIZEN SPEICHERN ====================
-void saveCalendarNotes() {
-  File f = SD.open("/calendar_notes.txt", FILE_WRITE);
-  if (!f) {
-    printToConsole(errorPrefix + "Cannot save calendar notes!", TFT_RED);
-    return;
-  }
-
-  for (int i = 0; i < (int)calendarNotes.size(); i++) {
-    f.print(calendarNotes[i].year);
-    f.print("|");
-    f.print(calendarNotes[i].month);
-    f.print("|");
-    f.print(calendarNotes[i].day);
-    f.print("|");
-    f.println(calendarNotes[i].note);
-  }
-  f.close();
-}
-
-// ==================== KALENDER NOTIZEN LADEN ====================
-void loadCalendarNotes() {
-  calendarNotes.clear();
-
-  File f = SD.open("/calendar_notes.txt", FILE_READ);
-  if (!f) return;
-
-  while (f.available()) {
-    String line = f.readStringUntil('\n');
-    line.replace("\r", "");
-
-    int firstSep = line.indexOf('|');
-    int secondSep = line.indexOf('|', firstSep + 1);
-    int thirdSep = line.indexOf('|', secondSep + 1);
-
-    if (firstSep > 0 && secondSep > 0 && thirdSep > 0) {
-      CalendarNote note;
-      note.year = line.substring(0, firstSep).toInt();
-      note.month = line.substring(firstSep + 1, secondSep).toInt();
-      note.day = line.substring(secondSep + 1, thirdSep).toInt();
-      note.note = line.substring(thirdSep + 1);
-      note.hasNote = true;
-      calendarNotes.push_back(note);
-    }
-  }
-  f.close();
-}
-
-// ==================== NOTIZ FÜR TAG HOLEN ====================
-String getNoteForDate(int year, int month, int day) {
-  for (int i = 0; i < (int)calendarNotes.size(); i++) {
-    if (calendarNotes[i].year == year && calendarNotes[i].month == month && calendarNotes[i].day == day) {
-      return calendarNotes[i].note;
-    }
-  }
-  return "";
-}
-
-// ==================== NOTIZ HINZUFÜGEN/BEARBEITEN ====================
-void addOrEditNote(int year, int month, int day) {
-  String existingNote = getNoteForDate(year, month, day);
-
-  tft.fillScreen(BG_COLOR);
-  tft.setTextSize(2);
-  tft.drawCentreString("NOTE FOR", 120, 45, 2);
-  tft.drawCentreString(String(day) + "." + String(month) + "." + String(year), 120, 70, 2);
-  tft.setTextSize(1);
-
-  if (existingNote != "") {
-    printToConsole(infoPrefix + "Edit existing note: " + existingNote, TFT_BLUE);
-  } else {
-    printToConsole(infoPrefix + "Add new note for " + String(day) + "." + String(month) + "." + String(year), TFT_BLUE);
-  }
-
-  printToConsole(infoPrefix + "Enter note (max 100 chars):", TFT_BLUE);
-  String newNote = getTextInput();
-
-  if (newNote != "") {
-    // Prüfen ob schon eine Notiz existiert
-    for (int i = 0; i < (int)calendarNotes.size(); i++) {
-      if (calendarNotes[i].year == year && calendarNotes[i].month == month && calendarNotes[i].day == day) {
-        calendarNotes[i].note = newNote;
-        saveCalendarNotes();
-        printToConsole(successPrefix + "Note updated!", TFT_GREEN);
-        return;
-      }
-    }
-
-    // Neue Notiz hinzufügen
-    CalendarNote note;
-    note.year = year;
-    note.month = month;
-    note.day = day;
-    note.note = newNote;
-    note.hasNote = true;
-    calendarNotes.push_back(note);
-    saveCalendarNotes();
-    printToConsole(successPrefix + "Note added!", TFT_GREEN);
-  }
-}
-
-// ==================== KALENDER ANZEIGEN ====================
-void drawCalendar(int year, int month) {
-  tft.fillRect(0, 35, 240, 285, BG_COLOR);
-
-  // Monat und Jahr Header
-  tft.fillRect(0, 35, 240, 30, ACCENT_COLOR);
-  tft.setTextColor(TFT_WHITE);
-  tft.setTextSize(2);
-
-  const char* monthNames[] = { "JAN", "FEB", "MAR", "APR", "MAY", "JUN",
-                               "JUL", "AUG", "SEP", "OCT", "NOV", "DEC" };
-  String header = String(monthNames[month - 1]) + " " + String(year);
-  tft.drawCentreString(header, 120, 42, 2);
-
-  // Navigation Buttons
-  tft.fillRoundRect(10, 5, 50, 25, 4, TFT_BLUE);
-  tft.drawCentreString("<", 35, 12, 2);
-
-  tft.fillRoundRect(180, 5, 50, 25, 4, TFT_BLUE);
-  tft.drawCentreString(">", 205, 12, 2);
-
-  tft.fillRoundRect(180, 295, 55, 25, 4, WARNING_COLOR);
-  tft.drawCentreString("ESC", 207, 302, 1);
-
-  // Wochentage
-  const char* weekdays[] = { "MO", "DI", "MI", "DO", "FR", "SA", "SO" };
-  tft.setTextSize(1);
-  tft.setTextColor(TEXT_COLOR);
-  for (int i = 0; i < 7; i++) {
-    tft.drawCentreString(weekdays[i], 20 + i * 32, 75, 1);
-  }
-
-  // Ersten Tag des Monats berechnen (vereinfacht)
-  int firstDayOfWeek = 1;  // Annahme: 1. ist Montag
-
-  // Anzahl Tage im Monat
-  int daysInMonth;
-  if (month == 2) {
-    // Schaltjahr prüfen
-    if ((year % 400 == 0) || (year % 4 == 0 && year % 100 != 0))
-      daysInMonth = 29;
-    else
-      daysInMonth = 28;
-  } else if (month == 4 || month == 6 || month == 9 || month == 11) {
-    daysInMonth = 30;
-  } else {
-    daysInMonth = 31;
-  }
-
-  // Kalender zeichnen
-  int startX = 10;
-  int startY = 95;
-  int cellW = 30;
-  int cellH = 28;
-
-  for (int day = 1; day <= daysInMonth; day++) {
-    int weekIndex = (day + firstDayOfWeek - 2) % 7;
-    int row = (day + firstDayOfWeek - 2) / 7;
-    int x = startX + weekIndex * cellW;
-    int y = startY + row * cellH;
-
-    // Zelle hervorheben wenn aktueller Tag
-    bool isToday = (day == currentDay && month == currentMonth && year == currentYear);
-
-    // Notiz vorhanden?
-    bool hasNote = (getNoteForDate(year, month, day) != "");
-
-    if (isToday) {
-      tft.fillRoundRect(x - 2, y - 2, cellW + 2, cellH + 2, 4, SUCCESS_COLOR);
-      tft.setTextColor(TFT_WHITE);
-    } else if (hasNote) {
-      tft.fillRoundRect(x - 2, y - 2, cellW + 2, cellH + 2, 4, TFT_YELLOW);
-      tft.setTextColor(TFT_BLACK);
-    } else {
-      tft.fillRoundRect(x - 2, y - 2, cellW + 2, cellH + 2, 4, BUTTON_COLOR);
-      tft.setTextColor(TEXT_COLOR);
-    }
-
-    tft.setTextSize(2);
-    tft.drawCentreString(String(day), x + cellW / 2, y + cellH / 2 - 5, 2);
-
-    // Notiz-Indikator (kleiner Punkt)
-    if (hasNote && !isToday) {
-      tft.fillCircle(x + cellW - 5, y + 5, 3, TFT_RED);
-    }
-  }
-
-  // Info Text
-  tft.setTextSize(1);
-  tft.setTextColor(TFT_CYAN);
-  tft.setCursor(10, 310);
-  tft.print("Tap date for note | Yellow=has note");
-}
-
-// ==================== KALENDER GUI ====================
-void calendarApp() {
-  int oldKbMode = kbMode;
-  String oldInput = currentInput;
-
-  loadCalendarNotes();
-
-  // Aktuelles Datum holen (vereinfacht - für NTP später)
-  struct tm timeinfo;
-  if (getLocalTime(&timeinfo)) {
-    currentYear = timeinfo.tm_year + 1900;
-    currentMonth = timeinfo.tm_mon + 1;
-    currentDay = timeinfo.tm_mday;
-  }
-
-  bool running = true;
-  int selectedDay = -1;
-
-  while (running) {
-    drawCalendar(currentYear, currentMonth);
-
-    int tx, ty;
-    if (getTouch(tx, ty)) {
-      // ESC Button
-      if (tx > 180 && ty > 295 && ty < 320) {
-        running = false;
-      }
-      // Previous Month Button
-      else if (tx < 60 && ty < 35) {
-        currentMonth--;
-        if (currentMonth < 1) {
-          currentMonth = 12;
-          currentYear--;
-        }
-        playSysSound(0);
-      }
-      // Next Month Button
-      else if (tx > 170 && tx < 230 && ty < 35) {
-        currentMonth++;
-        if (currentMonth > 12) {
-          currentMonth = 1;
-          currentYear++;
-        }
-        playSysSound(0);
-      }
-      // Kalender Zellen
-      else if (ty > 90 && ty < 290 && tx > 5 && tx < 230) {
-        int cellW = 30;
-        int startX = 10;
-        int startY = 95;
-
-        int col = (tx - startX) / cellW;
-        int row = (ty - startY) / 28;
-
-        if (col >= 0 && col < 7 && row >= 0 && row < 6) {
-          // Ersten Tag des Monats berechnen
-          int firstDayOfWeek = 1;  // Montag
-          int dayNumber = (row * 7 + col) - (firstDayOfWeek - 1) + 1;
-
-          // Anzahl Tage im Monat
-          int daysInMonth;
-          if (currentMonth == 2) {
-            if ((currentYear % 400 == 0) || (currentYear % 4 == 0 && currentYear % 100 != 0))
-              daysInMonth = 29;
-            else
-              daysInMonth = 28;
-          } else if (currentMonth == 4 || currentMonth == 6 || currentMonth == 9 || currentMonth == 11) {
-            daysInMonth = 30;
-          } else {
-            daysInMonth = 31;
-          }
-
-          if (dayNumber >= 1 && dayNumber <= daysInMonth) {
-            selectedDay = dayNumber;
-            addOrEditNote(currentYear, currentMonth, selectedDay);
-            playSysSound(1);
-            delay(500);
-          }
-        }
-      }
-    }
-    delay(50);
-  }
 
   kbMode = oldKbMode;
   currentInput = oldInput;
@@ -984,486 +1163,16 @@ void calendarApp() {
   updateInputLine(true);
 }
 
-// ==================== PERIODENSYSTEM DER ELEMENTE (ALLE 118) ====================
-// ==================== STRUKTUREN & FORWARD DEKLARATIONEN ====================
-// Vor allen Funktionen am Anfang der Datei einfügen!
-
-struct Element {
-  int number;
-  String symbol;
-  String name;
-  String group;
-  float atomicMass;
-  int period;
-  int groupNumber;
-  int electrons;
-  int protons;
-  int neutrons;
-  String discoverer;
-  int discoveryYear;
-  String density;
-  String meltingPoint;
-  String boilingPoint;
-};
-
-std::vector<Element> elements;
 
 // Forward Deklarationen
-void showElementDetails(Element e);
-int findElement(String query);
-void drawPeriodicTable();
-void periodicTableApp();
 void createQRCode(String data, int size, int xOffset, int yOffset);
 void qrGeneratorApp();
-void calendarApp();
-void saveCalendarNotes();
-void loadCalendarNotes();
-String getNoteForDate(int year, int month, int day);
-void addOrEditNote(int year, int month, int day);
-void drawCalendar(int year, int month);
 
 
 
 
-Element selectedElement;
 
-// ==================== ALLE 118 ELEMENTE LADEN ====================
-void loadElements() {
-  elements.clear();
 
-  // PERIODE 1
-  elements.push_back({ 1, "H", "Wasserstoff", "Nichtmetalle", 1.008, 1, 1, 1, 1, 0, "Henry Cavendish", 1766, "0.0899 g/L", "-259.1°C", "-252.9°C" });
-  elements.push_back({ 2, "He", "Helium", "Edelgase", 4.003, 1, 18, 2, 2, 2, "Pierre Janssen", 1868, "0.1785 g/L", "-272.2°C", "-268.9°C" });
-
-  // PERIODE 2
-  elements.push_back({ 3, "Li", "Lithium", "Alkalimetalle", 6.941, 2, 1, 3, 3, 4, "Johan August Arfwedson", 1817, "0.534 g/cm³", "180.5°C", "1342°C" });
-  elements.push_back({ 4, "Be", "Beryllium", "Erdalkalimetalle", 9.012, 2, 2, 4, 4, 5, "Louis-Nicolas Vauquelin", 1798, "1.85 g/cm³", "1287°C", "2470°C" });
-  elements.push_back({ 5, "B", "Bor", "Metalloide", 10.811, 2, 13, 5, 5, 6, "Joseph Louis Gay-Lussac", 1808, "2.34 g/cm³", "2076°C", "3927°C" });
-  elements.push_back({ 6, "C", "Kohlenstoff", "Nichtmetalle", 12.011, 2, 14, 6, 6, 6, "Bekannt seit Altertum", 0, "2.267 g/cm³", "3550°C", "4827°C" });
-  elements.push_back({ 7, "N", "Stickstoff", "Nichtmetalle", 14.007, 2, 15, 7, 7, 7, "Daniel Rutherford", 1772, "1.251 g/L", "-210.0°C", "-195.8°C" });
-  elements.push_back({ 8, "O", "Sauerstoff", "Nichtmetalle", 15.999, 2, 16, 8, 8, 8, "Carl Wilhelm Scheele", 1774, "1.429 g/L", "-218.8°C", "-183.0°C" });
-  elements.push_back({ 9, "F", "Fluor", "Halogene", 18.998, 2, 17, 9, 9, 10, "Henri Moissan", 1886, "1.696 g/L", "-219.6°C", "-188.1°C" });
-  elements.push_back({ 10, "Ne", "Neon", "Edelgase", 20.180, 2, 18, 10, 10, 10, "William Ramsay", 1898, "0.900 g/L", "-248.6°C", "-246.1°C" });
-
-  // PERIODE 3
-  elements.push_back({ 11, "Na", "Natrium", "Alkalimetalle", 22.990, 3, 1, 11, 11, 12, "Humphry Davy", 1807, "0.968 g/cm³", "97.8°C", "883°C" });
-  elements.push_back({ 12, "Mg", "Magnesium", "Erdalkalimetalle", 24.305, 3, 2, 12, 12, 12, "Joseph Black", 1755, "1.738 g/cm³", "650°C", "1091°C" });
-  elements.push_back({ 13, "Al", "Aluminium", "Metalle", 26.982, 3, 13, 13, 13, 14, "Hans Christian Ørsted", 1825, "2.70 g/cm³", "660.3°C", "2519°C" });
-  elements.push_back({ 14, "Si", "Silicium", "Metalloide", 28.086, 3, 14, 14, 14, 14, "Jöns Jacob Berzelius", 1824, "2.33 g/cm³", "1414°C", "3265°C" });
-  elements.push_back({ 15, "P", "Phosphor", "Nichtmetalle", 30.974, 3, 15, 15, 15, 16, "Hennig Brand", 1669, "1.82 g/cm³", "44.2°C", "280°C" });
-  elements.push_back({ 16, "S", "Schwefel", "Nichtmetalle", 32.065, 3, 16, 16, 16, 16, "Bekannt seit Altertum", 0, "2.07 g/cm³", "115.2°C", "444.7°C" });
-  elements.push_back({ 17, "Cl", "Chlor", "Halogene", 35.453, 3, 17, 17, 17, 18, "Carl Wilhelm Scheele", 1774, "3.214 g/L", "-101.5°C", "-34.0°C" });
-  elements.push_back({ 18, "Ar", "Argon", "Edelgase", 39.948, 3, 18, 18, 18, 22, "William Ramsay", 1894, "1.784 g/L", "-189.4°C", "-185.9°C" });
-
-  // PERIODE 4
-  elements.push_back({ 19, "K", "Kalium", "Alkalimetalle", 39.098, 4, 1, 19, 19, 20, "Humphry Davy", 1807, "0.856 g/cm³", "63.5°C", "759°C" });
-  elements.push_back({ 20, "Ca", "Calcium", "Erdalkalimetalle", 40.078, 4, 2, 20, 20, 20, "Humphry Davy", 1808, "1.55 g/cm³", "842°C", "1484°C" });
-  elements.push_back({ 21, "Sc", "Scandium", "Übergangsmetalle", 44.956, 4, 3, 21, 21, 24, "Lars Fredrik Nilson", 1879, "2.985 g/cm³", "1541°C", "2836°C" });
-  elements.push_back({ 22, "Ti", "Titan", "Übergangsmetalle", 47.867, 4, 4, 22, 22, 26, "William Gregor", 1791, "4.506 g/cm³", "1668°C", "3287°C" });
-  elements.push_back({ 23, "V", "Vanadium", "Übergangsmetalle", 50.942, 4, 5, 23, 23, 28, "Andrés Manuel del Río", 1801, "6.11 g/cm³", "1910°C", "3407°C" });
-  elements.push_back({ 24, "Cr", "Chrom", "Übergangsmetalle", 51.996, 4, 6, 24, 24, 28, "Louis-Nicolas Vauquelin", 1797, "7.19 g/cm³", "1907°C", "2671°C" });
-  elements.push_back({ 25, "Mn", "Mangan", "Übergangsmetalle", 54.938, 4, 7, 25, 25, 30, "Johann Gottlieb Gahn", 1774, "7.21 g/cm³", "1246°C", "2061°C" });
-  elements.push_back({ 26, "Fe", "Eisen", "Übergangsmetalle", 55.845, 4, 8, 26, 26, 30, "Bekannt seit Altertum", 0, "7.874 g/cm³", "1538°C", "2861°C" });
-  elements.push_back({ 27, "Co", "Cobalt", "Übergangsmetalle", 58.933, 4, 9, 27, 27, 32, "Georg Brandt", 1739, "8.90 g/cm³", "1495°C", "2927°C" });
-  elements.push_back({ 28, "Ni", "Nickel", "Übergangsmetalle", 58.693, 4, 10, 28, 28, 31, "Axel Fredrik Cronstedt", 1751, "8.908 g/cm³", "1455°C", "2913°C" });
-  elements.push_back({ 29, "Cu", "Kupfer", "Übergangsmetalle", 63.546, 4, 11, 29, 29, 35, "Bekannt seit Altertum", 0, "8.96 g/cm³", "1085°C", "2562°C" });
-  elements.push_back({ 30, "Zn", "Zink", "Metalle", 65.38, 4, 12, 30, 30, 35, "Bekannt seit Altertum", 0, "7.14 g/cm³", "419.5°C", "907°C" });
-  elements.push_back({ 31, "Ga", "Gallium", "Metalle", 69.723, 4, 13, 31, 31, 39, "Paul-Émile Lecoq de Boisbaudran", 1875, "5.91 g/cm³", "29.8°C", "2400°C" });
-  elements.push_back({ 32, "Ge", "Germanium", "Metalloide", 72.630, 4, 14, 32, 32, 41, "Clemens Winkler", 1886, "5.323 g/cm³", "938.3°C", "2833°C" });
-  elements.push_back({ 33, "As", "Arsen", "Metalloide", 74.922, 4, 15, 33, 33, 42, "Bekannt seit Altertum", 0, "5.727 g/cm³", "817°C", "614°C" });
-  elements.push_back({ 34, "Se", "Selen", "Nichtmetalle", 78.971, 4, 16, 34, 34, 45, "Jöns Jacob Berzelius", 1817, "4.81 g/cm³", "221°C", "685°C" });
-  elements.push_back({ 35, "Br", "Brom", "Halogene", 79.904, 4, 17, 35, 35, 45, "Antoine Jérôme Balard", 1826, "3.102 g/cm³", "-7.2°C", "58.8°C" });
-  elements.push_back({ 36, "Kr", "Krypton", "Edelgase", 83.798, 4, 18, 36, 36, 48, "William Ramsay", 1898, "3.749 g/L", "-157.4°C", "-153.4°C" });
-
-  // PERIODE 5
-  elements.push_back({ 37, "Rb", "Rubidium", "Alkalimetalle", 85.468, 5, 1, 37, 37, 48, "Robert Bunsen", 1861, "1.532 g/cm³", "39.3°C", "688°C" });
-  elements.push_back({ 38, "Sr", "Strontium", "Erdalkalimetalle", 87.62, 5, 2, 38, 38, 50, "William Cruickshank", 1787, "2.64 g/cm³", "777°C", "1382°C" });
-  elements.push_back({ 39, "Y", "Yttrium", "Übergangsmetalle", 88.906, 5, 3, 39, 39, 50, "Johan Gadolin", 1794, "4.472 g/cm³", "1526°C", "3336°C" });
-  elements.push_back({ 40, "Zr", "Zirconium", "Übergangsmetalle", 91.224, 5, 4, 40, 40, 51, "Martin Heinrich Klaproth", 1789, "6.52 g/cm³", "1855°C", "4409°C" });
-  elements.push_back({ 41, "Nb", "Niob", "Übergangsmetalle", 92.906, 5, 5, 41, 41, 52, "Charles Hatchett", 1801, "8.57 g/cm³", "2477°C", "4744°C" });
-  elements.push_back({ 42, "Mo", "Molybdän", "Übergangsmetalle", 95.95, 5, 6, 42, 42, 54, "Carl Wilhelm Scheele", 1778, "10.28 g/cm³", "2623°C", "4639°C" });
-  elements.push_back({ 43, "Tc", "Technetium", "Übergangsmetalle", 98.00, 5, 7, 43, 43, 55, "Carlo Perrier", 1937, "11.5 g/cm³", "2157°C", "4265°C" });
-  elements.push_back({ 44, "Ru", "Ruthenium", "Übergangsmetalle", 101.07, 5, 8, 44, 44, 57, "Karl Ernst Claus", 1844, "12.45 g/cm³", "2334°C", "4150°C" });
-  elements.push_back({ 45, "Rh", "Rhodium", "Übergangsmetalle", 102.91, 5, 9, 45, 45, 58, "William Hyde Wollaston", 1803, "12.41 g/cm³", "1964°C", "3695°C" });
-  elements.push_back({ 46, "Pd", "Palladium", "Übergangsmetalle", 106.42, 5, 10, 46, 46, 60, "William Hyde Wollaston", 1803, "12.023 g/cm³", "1555°C", "2963°C" });
-  elements.push_back({ 47, "Ag", "Silber", "Übergangsmetalle", 107.87, 5, 11, 47, 47, 61, "Bekannt seit Altertum", 0, "10.49 g/cm³", "961.8°C", "2162°C" });
-  elements.push_back({ 48, "Cd", "Cadmium", "Übergangsmetalle", 112.41, 5, 12, 48, 48, 64, "Friedrich Stromeyer", 1817, "8.65 g/cm³", "321.1°C", "767°C" });
-  elements.push_back({ 49, "In", "Indium", "Metalle", 114.82, 5, 13, 49, 49, 66, "Ferdinand Reich", 1863, "7.31 g/cm³", "156.6°C", "2072°C" });
-  elements.push_back({ 50, "Sn", "Zinn", "Metalle", 118.71, 5, 14, 50, 50, 69, "Bekannt seit Altertum", 0, "7.31 g/cm³", "231.9°C", "2602°C" });
-  elements.push_back({ 51, "Sb", "Antimon", "Metalloide", 121.76, 5, 15, 51, 51, 71, "Bekannt seit Altertum", 0, "6.68 g/cm³", "630.6°C", "1635°C" });
-  elements.push_back({ 52, "Te", "Tellur", "Metalloide", 127.60, 5, 16, 52, 52, 76, "Franz Joseph Müller", 1782, "6.24 g/cm³", "449.5°C", "988°C" });
-  elements.push_back({ 53, "I", "Iod", "Halogene", 126.90, 5, 17, 53, 53, 74, "Bernard Courtois", 1811, "4.93 g/cm³", "113.7°C", "184.3°C" });
-  elements.push_back({ 54, "Xe", "Xenon", "Edelgase", 131.29, 5, 18, 54, 54, 77, "William Ramsay", 1898, "5.894 g/L", "-111.8°C", "-108.0°C" });
-
-  // PERIODE 6 (Lanthanoide)
-  elements.push_back({ 55, "Cs", "Cäsium", "Alkalimetalle", 132.91, 6, 1, 55, 55, 78, "Robert Bunsen", 1860, "1.93 g/cm³", "28.5°C", "671°C" });
-  elements.push_back({ 56, "Ba", "Barium", "Erdalkalimetalle", 137.33, 6, 2, 56, 56, 81, "Humphry Davy", 1808, "3.51 g/cm³", "727°C", "1897°C" });
-  elements.push_back({ 57, "La", "Lanthan", "Lanthanoide", 138.91, 6, 3, 57, 57, 82, "Carl Gustaf Mosander", 1839, "6.162 g/cm³", "920°C", "3464°C" });
-  elements.push_back({ 58, "Ce", "Cer", "Lanthanoide", 140.12, 6, 101, 58, 58, 82, "Martin Heinrich Klaproth", 1803, "6.77 g/cm³", "798°C", "3443°C" });
-  elements.push_back({ 59, "Pr", "Praseodym", "Lanthanoide", 140.91, 6, 101, 59, 59, 82, "Carl Gustaf Mosander", 1841, "6.77 g/cm³", "931°C", "3520°C" });
-  elements.push_back({ 60, "Nd", "Neodym", "Lanthanoide", 144.24, 6, 101, 60, 60, 84, "Carl Gustaf Mosander", 1841, "7.01 g/cm³", "1024°C", "3074°C" });
-  elements.push_back({ 61, "Pm", "Promethium", "Lanthanoide", 145.00, 6, 101, 61, 61, 84, "Jacob A. Marinsky", 1945, "7.26 g/cm³", "1042°C", "3000°C" });
-  elements.push_back({ 62, "Sm", "Samarium", "Lanthanoide", 150.36, 6, 101, 62, 62, 88, "Paul-Émile Lecoq de Boisbaudran", 1879, "7.52 g/cm³", "1074°C", "1794°C" });
-  elements.push_back({ 63, "Eu", "Europium", "Lanthanoide", 151.96, 6, 101, 63, 63, 89, "Eugène-Anatole Demarçay", 1901, "5.244 g/cm³", "826°C", "1529°C" });
-  elements.push_back({ 64, "Gd", "Gadolinium", "Lanthanoide", 157.25, 6, 101, 64, 64, 93, "Jean Charles Galissard de Marignac", 1880, "7.90 g/cm³", "1313°C", "3273°C" });
-  elements.push_back({ 65, "Tb", "Terbium", "Lanthanoide", 158.93, 6, 101, 65, 65, 94, "Carl Gustaf Mosander", 1843, "8.23 g/cm³", "1356°C", "3123°C" });
-  elements.push_back({ 66, "Dy", "Dysprosium", "Lanthanoide", 162.50, 6, 101, 66, 66, 97, "Paul-Émile Lecoq de Boisbaudran", 1886, "8.54 g/cm³", "1412°C", "2567°C" });
-  elements.push_back({ 67, "Ho", "Holmium", "Lanthanoide", 164.93, 6, 101, 67, 67, 98, "Per Teodor Cleve", 1879, "8.79 g/cm³", "1461°C", "2720°C" });
-  elements.push_back({ 68, "Er", "Erbium", "Lanthanoide", 167.26, 6, 101, 68, 68, 99, "Carl Gustaf Mosander", 1843, "9.066 g/cm³", "1529°C", "2868°C" });
-  elements.push_back({ 69, "Tm", "Thulium", "Lanthanoide", 168.93, 6, 101, 69, 69, 100, "Per Teodor Cleve", 1879, "9.32 g/cm³", "1545°C", "1950°C" });
-  elements.push_back({ 70, "Yb", "Ytterbium", "Lanthanoide", 173.05, 6, 101, 70, 70, 103, "Jean Charles Galissard de Marignac", 1878, "6.90 g/cm³", "819°C", "1196°C" });
-  elements.push_back({ 71, "Lu", "Lutetium", "Lanthanoide", 174.97, 6, 101, 71, 71, 104, "Georges Urbain", 1907, "9.841 g/cm³", "1663°C", "3402°C" });
-
-  // PERIODE 6 (Fortsetzung)
-  elements.push_back({ 72, "Hf", "Hafnium", "Übergangsmetalle", 178.49, 6, 4, 72, 72, 106, "Dirk Coster", 1923, "13.31 g/cm³", "2233°C", "4603°C" });
-  elements.push_back({ 73, "Ta", "Tantal", "Übergangsmetalle", 180.95, 6, 5, 73, 73, 108, "Anders Gustaf Ekeberg", 1802, "16.69 g/cm³", "3017°C", "5458°C" });
-  elements.push_back({ 74, "W", "Wolfram", "Übergangsmetalle", 183.84, 6, 6, 74, 74, 110, "Carl Wilhelm Scheele", 1781, "19.25 g/cm³", "3422°C", "5555°C" });
-  elements.push_back({ 75, "Re", "Rhenium", "Übergangsmetalle", 186.21, 6, 7, 75, 75, 111, "Walter Noddack", 1925, "21.02 g/cm³", "3186°C", "5596°C" });
-  elements.push_back({ 76, "Os", "Osmium", "Übergangsmetalle", 190.23, 6, 8, 76, 76, 114, "Smithson Tennant", 1803, "22.59 g/cm³", "3033°C", "5012°C" });
-  elements.push_back({ 77, "Ir", "Iridium", "Übergangsmetalle", 192.22, 6, 9, 77, 77, 115, "Smithson Tennant", 1803, "22.56 g/cm³", "2446°C", "4428°C" });
-  elements.push_back({ 78, "Pt", "Platin", "Übergangsmetalle", 195.08, 6, 10, 78, 78, 117, "Antonio de Ulloa", 1748, "21.45 g/cm³", "1768°C", "3825°C" });
-  elements.push_back({ 79, "Au", "Gold", "Übergangsmetalle", 196.97, 6, 11, 79, 79, 118, "Bekannt seit Altertum", 0, "19.30 g/cm³", "1064°C", "2856°C" });
-  elements.push_back({ 80, "Hg", "Quecksilber", "Metalle", 200.59, 6, 12, 80, 80, 121, "Bekannt seit Altertum", 0, "13.534 g/cm³", "-38.8°C", "356.7°C" });
-  elements.push_back({ 81, "Tl", "Thallium", "Metalle", 204.38, 6, 13, 81, 81, 123, "William Crookes", 1861, "11.85 g/cm³", "304°C", "1473°C" });
-  elements.push_back({ 82, "Pb", "Blei", "Metalle", 207.20, 6, 14, 82, 82, 125, "Bekannt seit Altertum", 0, "11.34 g/cm³", "327.5°C", "1749°C" });
-  elements.push_back({ 83, "Bi", "Bismut", "Metalle", 208.98, 6, 15, 83, 83, 126, "Bekannt seit Altertum", 0, "9.78 g/cm³", "271.4°C", "1564°C" });
-  elements.push_back({ 84, "Po", "Polonium", "Metalloide", 209.00, 6, 16, 84, 84, 125, "Marie Curie", 1898, "9.196 g/cm³", "254°C", "962°C" });
-  elements.push_back({ 85, "At", "Astat", "Halogene", 210.00, 6, 17, 85, 85, 125, "Dale R. Corson", 1940, "7 g/cm³", "302°C", "337°C" });
-  elements.push_back({ 86, "Rn", "Radon", "Edelgase", 222.00, 6, 18, 86, 86, 136, "Friedrich Ernst Dorn", 1900, "9.73 g/L", "-71.0°C", "-61.7°C" });
-
-  // PERIODE 7 (Actinoide + Rest)
-  elements.push_back({ 87, "Fr", "Francium", "Alkalimetalle", 223.00, 7, 1, 87, 87, 136, "Marguerite Perey", 1939, "1.87 g/cm³", "27°C", "677°C" });
-  elements.push_back({ 88, "Ra", "Radium", "Erdalkalimetalle", 226.00, 7, 2, 88, 88, 138, "Marie Curie", 1898, "5.5 g/cm³", "700°C", "1737°C" });
-  elements.push_back({ 89, "Ac", "Actinium", "Actinoide", 227.00, 7, 3, 89, 89, 138, "André-Louis Debierne", 1899, "10.07 g/cm³", "1050°C", "3198°C" });
-  elements.push_back({ 90, "Th", "Thorium", "Actinoide", 232.04, 7, 102, 90, 90, 142, "Jöns Jacob Berzelius", 1829, "11.72 g/cm³", "1750°C", "4788°C" });
-  elements.push_back({ 91, "Pa", "Protactinium", "Actinoide", 231.04, 7, 102, 91, 91, 140, "Kazimierz Fajans", 1913, "15.37 g/cm³", "1572°C", "4027°C" });
-  elements.push_back({ 92, "U", "Uran", "Actinoide", 238.03, 7, 102, 92, 92, 146, "Martin Heinrich Klaproth", 1789, "19.05 g/cm³", "1135°C", "4131°C" });
-  elements.push_back({ 93, "Np", "Neptunium", "Actinoide", 237.00, 7, 102, 93, 93, 144, "Edwin McMillan", 1940, "19.45 g/cm³", "644°C", "3902°C" });
-  elements.push_back({ 94, "Pu", "Plutonium", "Actinoide", 244.00, 7, 102, 94, 94, 150, "Glenn T. Seaborg", 1940, "19.85 g/cm³", "639°C", "3228°C" });
-  elements.push_back({ 95, "Am", "Americium", "Actinoide", 243.00, 7, 102, 95, 95, 148, "Glenn T. Seaborg", 1944, "13.69 g/cm³", "1176°C", "2011°C" });
-  elements.push_back({ 96, "Cm", "Curium", "Actinoide", 247.00, 7, 102, 96, 96, 151, "Glenn T. Seaborg", 1944, "13.51 g/cm³", "1345°C", "3110°C" });
-  elements.push_back({ 97, "Bk", "Berkelium", "Actinoide", 247.00, 7, 102, 97, 97, 150, "Glenn T. Seaborg", 1949, "14.78 g/cm³", "986°C", "2627°C" });
-  elements.push_back({ 98, "Cf", "Californium", "Actinoide", 251.00, 7, 102, 98, 98, 153, "Stanley G. Thompson", 1950, "15.1 g/cm³", "900°C", "1470°C" });
-  elements.push_back({ 99, "Es", "Einsteinium", "Actinoide", 252.00, 7, 102, 99, 99, 153, "Albert Ghiorso", 1952, "8.84 g/cm³", "860°C", "996°C" });
-  elements.push_back({ 100, "Fm", "Fermium", "Actinoide", 257.00, 7, 102, 100, 100, 157, "Albert Ghiorso", 1952, "9.7 g/cm³", "1527°C", "NA" });
-  elements.push_back({ 101, "Md", "Mendelevium", "Actinoide", 258.00, 7, 102, 101, 101, 157, "Albert Ghiorso", 1955, "10.3 g/cm³", "827°C", "NA" });
-  elements.push_back({ 102, "No", "Nobelium", "Actinoide", 259.00, 7, 102, 102, 102, 157, "Albert Ghiorso", 1958, "9.9 g/cm³", "827°C", "NA" });
-  elements.push_back({ 103, "Lr", "Lawrencium", "Actinoide", 262.00, 7, 102, 103, 103, 159, "Albert Ghiorso", 1961, "15.6 g/cm³", "1627°C", "NA" });
-
-  // PERIODE 7 (Superschwere Elemente)
-  elements.push_back({ 104, "Rf", "Rutherfordium", "Übergangsmetalle", 267.00, 7, 4, 104, 104, 163, "Albert Ghiorso", 1969, "23.2 g/cm³", "2100°C", "5500°C" });
-  elements.push_back({ 105, "Db", "Dubnium", "Übergangsmetalle", 268.00, 7, 5, 105, 105, 163, "Albert Ghiorso", 1970, "29.3 g/cm³", "NA", "NA" });
-  elements.push_back({ 106, "Sg", "Seaborgium", "Übergangsmetalle", 271.00, 7, 6, 106, 106, 165, "Albert Ghiorso", 1974, "35.0 g/cm³", "NA", "NA" });
-  elements.push_back({ 107, "Bh", "Bohrium", "Übergangsmetalle", 270.00, 7, 7, 107, 107, 163, "Gottfried Münzenberg", 1981, "37.1 g/cm³", "NA", "NA" });
-  elements.push_back({ 108, "Hs", "Hassium", "Übergangsmetalle", 277.00, 7, 8, 108, 108, 169, "Gottfried Münzenberg", 1984, "40.7 g/cm³", "NA", "NA" });
-  elements.push_back({ 109, "Mt", "Meitnerium", "Übergangsmetalle", 278.00, 7, 9, 109, 109, 169, "Gottfried Münzenberg", 1982, "37.4 g/cm³", "NA", "NA" });
-  elements.push_back({ 110, "Ds", "Darmstadtium", "Übergangsmetalle", 281.00, 7, 10, 110, 110, 171, "Sigurd Hofmann", 1994, "34.8 g/cm³", "NA", "NA" });
-  elements.push_back({ 111, "Rg", "Roentgenium", "Übergangsmetalle", 282.00, 7, 11, 111, 111, 171, "Sigurd Hofmann", 1994, "28.7 g/cm³", "NA", "NA" });
-  elements.push_back({ 112, "Cn", "Copernicium", "Übergangsmetalle", 285.00, 7, 12, 112, 112, 173, "Sigurd Hofmann", 1996, "23.7 g/cm³", "NA", "NA" });
-  elements.push_back({ 113, "Nh", "Nihonium", "Metalle", 284.00, 7, 13, 113, 113, 171, "Kosuke Morita", 2004, "16 g/cm³", "NA", "NA" });
-  elements.push_back({ 114, "Fl", "Flerovium", "Metalle", 289.00, 7, 14, 114, 114, 175, "Yuri Oganessian", 1999, "14 g/cm³", "NA", "NA" });
-  elements.push_back({ 115, "Mc", "Moscovium", "Metalle", 288.00, 7, 15, 115, 115, 173, "Yuri Oganessian", 2004, "13.5 g/cm³", "NA", "NA" });
-  elements.push_back({ 116, "Lv", "Livermorium", "Metalle", 293.00, 7, 16, 116, 116, 177, "Yuri Oganessian", 2000, "12.9 g/cm³", "NA", "NA" });
-  elements.push_back({ 117, "Ts", "Tenness", "Halogene", 294.00, 7, 17, 117, 117, 177, "Yuri Oganessian", 2010, "11.4 g/cm³", "NA", "NA" });
-  elements.push_back({ 118, "Og", "Oganesson", "Edelgase", 294.00, 7, 18, 118, 118, 176, "Yuri Oganessian", 2006, "7.2 g/cm³", "NA", "NA" });
-}
-
-void showElementDetails(Element e) {
-  tft.fillScreen(BG_COLOR);
-
-  // Header
-  tft.fillRect(0, 35, 240, 40, ACCENT_COLOR);
-  tft.setTextColor(TFT_WHITE);
-  tft.setTextSize(2);
-  tft.drawCentreString(e.symbol + " - " + e.name, 120, 48, 2);
-
-  // ESC Button
-  tft.fillRoundRect(180, 5, 55, 25, 4, WARNING_COLOR);
-  tft.drawCentreString("ESC", 207, 10, 2);
-
-  tft.setTextSize(1);
-  tft.setTextColor(TEXT_COLOR);
-
-  // Element Informationen (2 Spalten)
-  int y = 85;
-  int col1 = 20, col2 = 130;
-
-  // Linke Spalte
-  tft.setCursor(col1, y);
-  tft.print("Ordnungszahl:");
-  tft.setCursor(col1 + 100, y);
-  tft.setTextColor(ACCENT_COLOR);
-  tft.println(String(e.number));
-
-  tft.setTextColor(TEXT_COLOR);
-  tft.setCursor(col1, y + 16);
-  tft.print("Symbol:");
-  tft.setCursor(col1 + 100, y + 16);
-  tft.setTextColor(ACCENT_COLOR);
-  tft.println(e.symbol);
-
-  tft.setTextColor(TEXT_COLOR);
-  tft.setCursor(col1, y + 32);
-  tft.print("Name:");
-  tft.setCursor(col1 + 100, y + 32);
-  tft.setTextColor(ACCENT_COLOR);
-  tft.println(e.name);
-
-  tft.setTextColor(TEXT_COLOR);
-  tft.setCursor(col1, y + 48);
-  tft.print("Gruppe:");
-  tft.setCursor(col1 + 100, y + 48);
-  tft.setTextColor(ACCENT_COLOR);
-  tft.println(e.group);
-
-  tft.setTextColor(TEXT_COLOR);
-  tft.setCursor(col1, y + 64);
-  tft.print("Periode:");
-  tft.setCursor(col1 + 100, y + 64);
-  tft.setTextColor(ACCENT_COLOR);
-  tft.println(String(e.period));
-
-  // Rechte Spalte
-  tft.setTextColor(TEXT_COLOR);
-  tft.setCursor(col2, y);
-  tft.print("Atommasse:");
-  tft.setCursor(col2 + 85, y);
-  tft.setTextColor(ACCENT_COLOR);
-  tft.println(String(e.atomicMass, 3) + " u");
-
-  tft.setTextColor(TEXT_COLOR);
-  tft.setCursor(col2, y + 16);
-  tft.print("Elektronen:");
-  tft.setCursor(col2 + 85, y + 16);
-  tft.setTextColor(ACCENT_COLOR);
-  tft.println(String(e.electrons));
-
-  tft.setTextColor(TEXT_COLOR);
-  tft.setCursor(col2, y + 32);
-  tft.print("Protonen:");
-  tft.setCursor(col2 + 85, y + 32);
-  tft.setTextColor(ACCENT_COLOR);
-  tft.println(String(e.protons));
-
-  tft.setTextColor(TEXT_COLOR);
-  tft.setCursor(col2, y + 48);
-  tft.print("Neutronen:");
-  tft.setCursor(col2 + 85, y + 48);
-  tft.setTextColor(ACCENT_COLOR);
-  tft.println(String(e.neutrons));
-
-  // Unterer Bereich
-  int y2 = 180;
-  tft.setTextColor(TEXT_COLOR);
-  tft.setCursor(col1, y2);
-  tft.print("Dichte:");
-  tft.setCursor(col1 + 85, y2);
-  tft.setTextColor(ACCENT_COLOR);
-  tft.println(e.density);
-
-  tft.setTextColor(TEXT_COLOR);
-  tft.setCursor(col1, y2 + 16);
-  tft.print("Schmelzpunkt:");
-  tft.setCursor(col1 + 85, y2 + 16);
-  tft.setTextColor(ACCENT_COLOR);
-  tft.println(e.meltingPoint);
-
-  tft.setTextColor(TEXT_COLOR);
-  tft.setCursor(col1, y2 + 32);
-  tft.print("Siedepunkt:");
-  tft.setCursor(col1 + 85, y2 + 32);
-  tft.setTextColor(ACCENT_COLOR);
-  tft.println(e.boilingPoint);
-
-  // Info Box
-  tft.fillRoundRect(15, 240, 210, 55, 5, BUTTON_COLOR);
-  tft.setTextColor(TEXT_COLOR);
-  tft.setCursor(25, 255);
-  tft.print("📚 Entdeckung:");
-  tft.setCursor(25, 270);
-  tft.setTextColor(ACCENT_COLOR);
-  if (e.discoveryYear > 0) {
-    tft.print(e.discoverer + " (" + String(e.discoveryYear) + ")");
-  } else {
-    tft.print("Bekannt seit der Antike");
-  }
-
-  // Warten auf Touch
-  bool waiting = true;
-  while (waiting) {
-    int tx, ty;
-    if (getTouch(tx, ty)) {
-      if (tx > 180 && ty < 40) {
-        waiting = false;
-      }
-    }
-    delay(50);
-  }
-}
-
-int findElement(String query) {
-  query.toLowerCase();
-  for (int i = 0; i < (int)elements.size(); i++) {
-    String name = elements[i].name;
-    name.toLowerCase();
-    String symbol = elements[i].symbol;
-    symbol.toLowerCase();
-
-    if (name.indexOf(query) >= 0 || symbol == query || String(elements[i].number) == query) {
-      return i;
-    }
-  }
-  return -1;
-}
-
-void drawPeriodicTable() {
-  tft.fillRect(0, 35, 240, 285, BG_COLOR);
-
-  // Header
-  tft.fillRect(0, 35, 240, 30, ACCENT_COLOR);
-  tft.setTextColor(TFT_WHITE);
-  tft.setTextSize(2);
-  tft.drawCentreString("PERIODENSYSTEM", 120, 42, 2);
-
-  // ESC Button
-  tft.fillRoundRect(180, 5, 55, 25, 4, WARNING_COLOR);
-  tft.drawCentreString("ESC", 207, 10, 2);
-
-  // Suchfeld
-  tft.fillRoundRect(10, 70, 180, 28, 4, BUTTON_COLOR);
-  tft.setTextColor(TEXT_COLOR);
-  tft.drawCentreString("🔍 SEARCH ELEMENT", 100, 84, 1);
-
-  tft.fillRoundRect(195, 70, 35, 28, 4, SUCCESS_COLOR);
-  tft.drawCentreString("GO", 212, 84, 1);
-
-  // Perioden Auswahl Buttons
-  const char* periods[] = { "1-2", "3-4", "5-6", "7" };
-  for (int i = 0; i < 4; i++) {
-    int x = 10 + i * 55;
-    tft.fillRoundRect(x, 105, 50, 22, 3, BUTTON_COLOR);
-    tft.drawCentreString(periods[i], x + 25, 116, 1);
-  }
-
-  // Elemente als Raster
-  int cellW = 45;
-  int cellH = 32;  // WICHTIG: cellH definieren!
-  int startX = 12;
-  int startY = 135;
-  int perRow = 5;
-
-  for (int i = 0; i < (int)elements.size() && i < 40; i++) {
-    int row = i / perRow;
-    int col = i % perRow;
-    int x = startX + col * cellW;
-    int y = startY + row * cellH;
-
-    // Farbgruppe
-    uint16_t color;
-    if (elements[i].group == "Alkalimetalle") color = TFT_RED;
-    else if (elements[i].group == "Erdalkalimetalle") color = TFT_ORANGE;
-    else if (elements[i].group == "Übergangsmetalle") color = TFT_BLUE;
-    else if (elements[i].group == "Halogene") color = TFT_GREEN;
-    else if (elements[i].group == "Edelgase") color = TFT_CYAN;
-    else if (elements[i].group == "Nichtmetalle") color = TFT_YELLOW;
-    else if (elements[i].group == "Lanthanoide") color = TFT_PURPLE;
-    else if (elements[i].group == "Actinoide") color = TFT_MAGENTA;
-    else if (elements[i].group == "Metalloide") color = TFT_OLIVE;
-    else color = BUTTON_COLOR;
-
-    tft.fillRoundRect(x, y, cellW - 2, cellH - 2, 3, color);
-    tft.drawRoundRect(x, y, cellW - 2, cellH - 2, 3, TEXT_COLOR);
-
-    tft.setTextSize(1);
-    tft.setTextColor(TEXT_COLOR);
-    tft.drawCentreString(elements[i].symbol, x + 20, y + 8, 1);
-    tft.setTextSize(1);
-    tft.drawCentreString(String(elements[i].number), x + 20, y + 20, 1);
-  }
-
-  // Informationstext
-  tft.setTextSize(1);
-  tft.setTextColor(TFT_CYAN);
-  tft.setCursor(10, 310);
-  tft.print("Tap element for details | 📍 " + String(elements.size()) + " elements");
-}
-
-void periodicTableApp() {
-  int oldKbMode = kbMode;
-  String oldInput = currentInput;
-
-  loadElements();
-  bool running = true;
-
-  while (running) {
-    drawPeriodicTable();
-
-    int tx, ty;
-    if (getTouch(tx, ty)) {
-      // ESC Button
-      if (tx > 180 && ty < 40) {
-        running = false;
-      }
-      // Search Box
-      else if (ty > 70 && ty < 98) {
-        if (tx < 190) {
-          printToConsole(infoPrefix + "Enter element name, symbol or number:", TFT_BLUE);
-          String query = getTextInput();
-          if (query != "") {
-            int idx = findElement(query);
-            if (idx >= 0) {
-              showElementDetails(elements[idx]);
-            } else {
-              printToConsole(errorPrefix + "Element not found: " + query, TFT_RED);
-              delay(1500);
-            }
-            tft.fillScreen(BG_COLOR);
-            drawPeriodicTable();
-          }
-        } else if (tx > 195) {
-          printToConsole(infoPrefix + "Enter element name, symbol or number:", TFT_BLUE);
-          String query = getTextInput();
-          if (query != "") {
-            int idx = findElement(query);
-            if (idx >= 0) {
-              showElementDetails(elements[idx]);
-            } else {
-              printToConsole(errorPrefix + "Element not found: " + query, TFT_RED);
-              delay(1500);
-            }
-          }
-        }
-      }
-      // Elemente Raster
-      else if (ty > 132 && ty < 290) {
-        int cellW = 45;
-        int cellH = 32;
-        int startX = 12;
-        int startY = 135;
-        int perRow = 5;
-
-        int col = (tx - startX) / cellW;
-        int row = (ty - startY) / cellH;
-        int index = row * perRow + col;
-
-        if (index >= 0 && index < (int)elements.size() && index < 40) {
-          showElementDetails(elements[index]);
-          tft.fillScreen(BG_COLOR);
-          drawPeriodicTable();
-        }
-      }
-    }
-    delay(50);
-  }
-
-  kbMode = oldKbMode;
-  currentInput = oldInput;
-  tft.fillScreen(BG_COLOR);
-  drawKeyboard();
-  drawScrollButtons();
-  refreshTerminal();
-  updateInputLine(true);
-}
 
 // ==================== QR CODE GENERATOR ====================
 
@@ -3827,116 +3536,9 @@ void drawingApp() {
 
 
 
-void loadNotes() {
-  notes.clear();
-  File f = SD.open("/notes.txt", FILE_READ);
-  if (f) {
-    while (f.available()) {
-      notes.push_back(f.readStringUntil('\n'));
-    }
-    f.close();
-  }
-}
 
-void saveNotes() {
-  File f = SD.open("/notes.txt", FILE_WRITE);
-  if (f) {
-    for (String note : notes) {
-      f.println(note);
-    }
-    f.close();
-  }
-}
 
-void notesApp() {
-  int oldKbMode = kbMode;
-  String oldInput = currentInput;
 
-  tft.fillRect(0, 35, 240, 285, BG_COLOR);
-  loadNotes();
-  int selected = -1;
-  bool running = true;
-
-  while (running) {
-    tft.fillRect(0, 35, 240, 285, BG_COLOR);
-
-    // Draw notes list
-    tft.setTextSize(1);
-    tft.setTextColor(TEXT_COLOR);
-    for (int i = 0; i < min(10, (int)notes.size()); i++) {
-      int y = 45 + i * 22;
-      if (i == selected) {
-        tft.fillRoundRect(10, y - 2, 220, 20, 3, ACCENT_COLOR);
-        tft.setTextColor(TFT_WHITE);
-      } else {
-        tft.fillRoundRect(10, y - 2, 220, 20, 3, BUTTON_COLOR);
-        tft.setTextColor(TEXT_COLOR);
-      }
-      tft.setCursor(15, y);
-      String display = notes[i];
-      if (display.length() > 27) display = display.substring(0, 24) + "...";
-      tft.print(display);
-    }
-
-    if (notes.size() == 0) {
-      tft.drawCentreString("No notes. Press NEW to create", 120, 100, 1);
-    }
-
-    // Buttons
-    tft.fillRoundRect(10, 270, 70, 25, 4, SUCCESS_COLOR);
-    tft.drawCentreString("NEW", 45, 280, 1);
-    tft.fillRoundRect(85, 270, 70, 25, 4, WARNING_COLOR);
-    tft.drawCentreString("DEL", 120, 280, 1);
-    tft.fillRoundRect(160, 270, 70, 25, 4, TFT_BLUE);
-    tft.drawCentreString("EDIT", 195, 280, 1);
-
-    tft.fillRoundRect(180, 5, 55, 25, 4, WARNING_COLOR);
-    tft.drawCentreString("ESC", 207, 10, 2);
-
-    int tx, ty;
-    if (getTouch(tx, ty)) {
-      if (tx > 180 && ty < 40) {
-        running = false;
-      } else if (ty > 270 && ty < 295) {
-        if (tx < 80) {  // NEW
-          printToConsole(infoPrefix + "Enter note text:", TFT_BLUE);
-          String newNote = getTextInput();
-          if (newNote != "") {
-            notes.push_back(newNote);
-            saveNotes();
-            printToConsole(successPrefix + "Note saved", TFT_GREEN);
-          }
-        } else if (tx < 155 && selected >= 0) {  // DEL
-          notes.erase(notes.begin() + selected);
-          selected = -1;
-          saveNotes();
-          printToConsole(successPrefix + "Note deleted", TFT_GREEN);
-        } else if (tx >= 155 && selected >= 0) {  // EDIT
-          printToConsole(infoPrefix + "Edit note (current: " + notes[selected] + ")", TFT_BLUE);
-          String editedNote = getTextInput();
-          if (editedNote != "") {
-            notes[selected] = editedNote;
-            saveNotes();
-            printToConsole(successPrefix + "Note updated", TFT_GREEN);
-          }
-        }
-      } else if (ty > 40 && ty < 260) {
-        selected = (ty - 40) / 22;
-        if (selected >= (int)notes.size()) selected = -1;
-        playSysSound(0);
-      }
-    }
-    delay(50);
-  }
-
-  kbMode = oldKbMode;
-  currentInput = oldInput;
-  tft.fillScreen(BG_COLOR);
-  drawKeyboard();
-  drawScrollButtons();
-  refreshTerminal();
-  updateInputLine(true);
-}
 
 void todoApp() {
   int oldKbMode = kbMode;
@@ -4296,358 +3898,896 @@ void chatApp(bool isHost) {
   updateInputLine(true);
 }
 
-void writeHelpFile() {
-  printToConsole(infoPrefix + "Creating help files...", TFT_BLUE);
+// ==================== VERBESSERTE HELP-FUNKTION ====================
 
-  // Haupt-Hilfe
+void writeHelpFile() {
+  printToConsole(infoPrefix + "Creating enhanced help system...", TFT_BLUE);
+
+  // ==================== HAUPT-HILFE (Übersicht) ====================
   SD.remove("/help.txt");
   File f = SD.open("/help.txt", FILE_WRITE);
   if (f) {
-    f.println("╔══════════════════════════════════════════════════════════╗");
-    f.println("║              CYT TERMINAL OS v3.0                        ║");
-    f.println("║              ESP32-WROOM Command Reference               ║");
-    f.println("╚══════════════════════════════════════════════════════════╝");
+    f.println("╔══════════════════════════════════════════════════════════════════════╗");
+    f.println("║                    CYD TERMINAL OS v3.1                              ║");
+    f.println("║                    ESP32-WROOM Command Reference                     ║");
+    f.println("╚══════════════════════════════════════════════════════════════════════╝");
     f.println("");
-    f.println("╔══════════════════════════════════════════════════════════╗");
-    f.println("║ QUICK REFERENCE                                          ║");
-    f.println("╠══════════════════════════════════════════════════════════╣");
-    f.println("║ help, ?        - This help system                        ║");
-    f.println("║ man <cmd>      - Manual page for command                 ║");
-    f.println("║ cls, clear     - Clear terminal                          ║");
-    f.println("║ reboot         - Restart system                          ║");
-    f.println("║ date, uptime   - Time information                        ║");
-    f.println("║ free, ps       - System resources                        ║");
-    f.println("║ neofetch       - System info banner                      ║");
-    f.println("║ darkmode       - Toggle dark/light mode                  ║");
-    f.println("║ sound          - Toggle system sounds                    ║");
-    f.println("║ colors         - List available colors                   ║");
-    f.println("╚══════════════════════════════════════════════════════════╝");
+    f.println("┌─────────────────────────────────────────────────────────────────────┐");
+    f.println("│ QUICK REFERENCE - Most Important Commands                           │");
+    f.println("├─────────────────────────────────────────────────────────────────────┤");
+    f.println("│ help, ?          - This help system                                 │");
+    f.println("│ help <category>  - Category help (system, files, net, games, etc)   │");
+    f.println("│ man <cmd>        - Manual page for specific command                 │");
+    f.println("│ cls, clear       - Clear terminal screen                            │");
+    f.println("│ reboot           - Restart system                                   │");
+    f.println("│ darkmode         - Toggle dark/light mode                           │");
+    f.println("│ sound            - Toggle system sounds                             │");
+    f.println("└─────────────────────────────────────────────────────────────────────┘");
     f.println("");
-    f.println("AVAILABLE CATEGORIES:");
-    f.println("  help system    - System commands");
-    f.println("  help files     - File operations");
-    f.println("  help net       - Network tools");
-    f.println("  help games     - Games & Entertainment");
-    f.println("  help apps      - Applications");
-    f.println("  help i2c       - I2C bus tools");
-    f.println("  help dev       - Developer tools");
-    f.println("  help tips      - Tips & Tricks");
-    f.println("  help all       - Complete reference");
+    f.println("┌─────────────────────────────────────────────────────────────────────┐");
+    f.println("│ COMMAND CATEGORIES (use 'help <category>')                          │");
+    f.println("├─────────────────────────────────────────────────────────────────────┤");
+    f.println("│ system    - System commands (reboot, info, settings)                │");
+    f.println("│ files     - File operations (ls, cat, rm, mkdir)                    │");
+    f.println("│ net       - Network & WiFi (scan, connect, fileserver)              │");
+    f.println("│ games     - Games (snake, pong, tictac, chip8)                      │");
+    f.println("│ apps      - Applications (calc, draw, todo, timer)                  │");
+    f.println("│ i2c       - I2C bus tools (scanner, reader, writer)                 │");
+    f.println("│ dev       - Developer tools (echo, eval, delay)                     │");
+    f.println("│ qr        - QR Code Generator                                      │");
+    f.println("│ help      - This help system                                        │");
+    f.println("│ tips      - Tips & tricks                                           │");
+    f.println("│ all       - Complete command reference                              │");
+    f.println("└─────────────────────────────────────────────────────────────────────┘");
+    f.println("");
+    f.println("┌─────────────────────────────────────────────────────────────────────┐");
+    f.println("│ TIPS                                                               │");
+    f.println("├─────────────────────────────────────────────────────────────────────┤");
+    f.println("│ • Touch keyboard: scroll with ▲▼ buttons on right                   │");
+    f.println("│ • ESC button: top-right corner to exit apps                         │");
+    f.println("│ • Commands are case-insensitive                                     │");
+    f.println("│ • Use TAB for auto-completion (coming soon)                         │");
+    f.println("│ • File server: http://<IP>:8080 after 'fileserver'                  │");
+    f.println("└─────────────────────────────────────────────────────────────────────┘");
     f.close();
   }
 
-  // System Hilfe
-  SD.remove("/help_sys.txt");
-  f = SD.open("/help_sys.txt", FILE_WRITE);
+  // ==================== SYSTEM CATEGORY ====================
+  SD.remove("/help_system.txt");
+  f = SD.open("/help_system.txt", FILE_WRITE);
   if (f) {
-    f.println("═══════════════════════════════════════════════════════════");
-    f.println("SYSTEM COMMANDS");
-    f.println("═══════════════════════════════════════════════════════════");
+    f.println("╔══════════════════════════════════════════════════════════════════════╗");
+    f.println("║ SYSTEM COMMANDS                                                      ║");
+    f.println("╚══════════════════════════════════════════════════════════════════════╝");
     f.println("");
-    f.println("cls, clear");
-    f.println("  Clears the terminal screen completely");
-    f.println("  Usage: cls");
+    f.println("┌─────────────────────────────────────────────────────────────────────┐");
+    f.println("│ BASIC SYSTEM COMMANDS                                               │");
+    f.println("├─────────────────────────────────────────────────────────────────────┤");
+    f.println("│                                                                     │");
+    f.println("│ cls, clear                                                          │");
+    f.println("│   Clears the terminal screen completely                             │");
+    f.println("│   Usage: cls                                                        │");
+    f.println("│                                                                     │");
+    f.println("│ reboot, restart                                                     │");
+    f.println("│   Restarts the CYD OS                                               │");
+    f.println("│   Usage: reboot                                                     │");
+    f.println("│                                                                     │");
+    f.println("│ darkmode, theme                                                     │");
+    f.println("│   Toggle between dark and light theme                               │");
+    f.println("│   Usage: darkmode                                                   │");
+    f.println("│                                                                     │");
+    f.println("│ sound                                                               │");
+    f.println("│   Toggle system sounds on/off                                       │");
+    f.println("│   Usage: sound                                                      │");
+    f.println("│                                                                     │");
+    f.println("│ settings                                                            │");
+    f.println("│   Open graphical settings menu                                      │");
+    f.println("│   Usage: settings                                                   │");
+    f.println("│                                                                     │");
+    f.println("└─────────────────────────────────────────────────────────────────────┘");
     f.println("");
-    f.println("reboot, restart");
-    f.println("  Restarts the CYT OS");
-    f.println("  Usage: reboot");
-    f.println("");
-    f.println("date");
-    f.println("  Shows seconds since boot");
-    f.println("  Usage: date");
-    f.println("");
-    f.println("uptime");
-    f.println("  Shows system uptime in HH:MM:SS");
-    f.println("  Usage: uptime");
-    f.println("");
-    f.println("free");
-    f.println("  Displays RAM and Flash usage");
-    f.println("  Usage: free");
-    f.println("");
-    f.println("ps");
-    f.println("  Lists running processes");
-    f.println("  Usage: ps");
-    f.println("");
-    f.println("neofetch");
-    f.println("  Shows ASCII art system info");
-    f.println("  Usage: neofetch");
-    f.println("");
-    f.println("sysinfo, stats");
-    f.println("  Detailed hardware information");
-    f.println("  Usage: sysinfo");
-    f.println("");
-    f.println("sd, storage");
-    f.println("  SD card status and capacity");
-    f.println("  Usage: sd");
-    f.println("");
-    f.println("darkmode, theme");
-    f.println("  Toggle dark/light mode");
-    f.println("  Usage: darkmode");
-    f.println("");
-    f.println("sound");
-    f.println("  Toggle system sounds on/off");
-    f.println("  Usage: sound");
-    f.println("");
-    f.println("colors");
-    f.println("  List all available color names");
-    f.println("  Usage: colors");
-    f.println("");
-    f.println("settings");
-    f.println("  Open settings menu (GUI)");
-    f.println("  Usage: settings");
+    f.println("┌─────────────────────────────────────────────────────────────────────┐");
+    f.println("│ SYSTEM INFORMATION                                                  │");
+    f.println("├─────────────────────────────────────────────────────────────────────┤");
+    f.println("│                                                                     │");
+    f.println("│ sysinfo, stats                                                      │");
+    f.println("│   Displays detailed hardware information                            │");
+    f.println("│   Usage: sysinfo                                                    │");
+    f.println("│                                                                     │");
+    f.println("│ neofetch                                                            │");
+    f.println("│   Shows ASCII art system info banner                                │");
+    f.println("│   Usage: neofetch                                                   │");
+    f.println("│                                                                     │");
+    f.println("│ free                                                                │");
+    f.println("│   Shows RAM and Flash memory usage                                  │");
+    f.println("│   Usage: free                                                       │");
+    f.println("│                                                                     │");
+    f.println("│ ps                                                                  │");
+    f.println("│   Lists running processes                                           │");
+    f.println("│   Usage: ps                                                         │");
+    f.println("│                                                                     │");
+    f.println("│ sd, storage                                                         │");
+    f.println("│   SD card status and capacity                                       │");
+    f.println("│   Usage: sd                                                         │");
+    f.println("│                                                                     │");
+    f.println("│ date                                                                │");
+    f.println("│   Shows time since boot                                             │");
+    f.println("│   Usage: date                                                       │");
+    f.println("│                                                                     │");
+    f.println("│ uptime                                                              │");
+    f.println("│   Shows system uptime in HH:MM:SS                                   │");
+    f.println("│   Usage: uptime                                                     │");
+    f.println("│                                                                     │");
+    f.println("└─────────────────────────────────────────────────────────────────────┘");
     f.close();
   }
 
-  // Datei Hilfe
+  // ==================== FILES CATEGORY ====================
   SD.remove("/help_files.txt");
   f = SD.open("/help_files.txt", FILE_WRITE);
   if (f) {
-    f.println("═══════════════════════════════════════════════════════════");
-    f.println("FILE OPERATIONS");
-    f.println("═══════════════════════════════════════════════════════════");
+    f.println("╔══════════════════════════════════════════════════════════════════════╗");
+    f.println("║ FILE OPERATIONS                                                      ║");
+    f.println("╚══════════════════════════════════════════════════════════════════════╝");
     f.println("");
-    f.println("ls [path]");
-    f.println("  List directory contents");
-    f.println("  Usage: ls /folder");
+    f.println("┌─────────────────────────────────────────────────────────────────────┐");
+    f.println("│ DIRECTORY NAVIGATION                                                │");
+    f.println("├─────────────────────────────────────────────────────────────────────┤");
+    f.println("│                                                                     │");
+    f.println("│ ls [path]                                                           │");
+    f.println("│   List directory contents (files and folders)                       │");
+    f.println("│   Examples: ls, ls /, ls /folder                                    │");
+    f.println("│                                                                     │");
+    f.println("│ dir [path]                                                          │");
+    f.println("│   Alias for ls                                                      │");
+    f.println("│   Usage: dir                                                        │");
+    f.println("│                                                                     │");
+    f.println("│ cd <path>                                                           │");
+    f.println("│   Change directory (for file operations)                            │");
+    f.println("│   Usage: cd /folder                                                 │");
+    f.println("│                                                                     │");
+    f.println("│ pwd                                                                 │");
+    f.println("│   Print working directory                                           │");
+    f.println("│   Usage: pwd                                                        │");
+    f.println("│                                                                     │");
+    f.println("└─────────────────────────────────────────────────────────────────────┘");
     f.println("");
-    f.println("dir [path]");
-    f.println("  Alias for ls");
-    f.println("  Usage: dir /");
+    f.println("┌─────────────────────────────────────────────────────────────────────┐");
+    f.println("│ FILE VIEWING                                                        │");
+    f.println("├─────────────────────────────────────────────────────────────────────┤");
+    f.println("│                                                                     │");
+    f.println("│ cat <file>                                                          │");
+    f.println("│   Display entire file contents (use for small files)                │");
+    f.println("│   Usage: cat /readme.txt                                            │");
+    f.println("│                                                                     │");
+    f.println("│ head [-n<lines>] <file>                                             │");
+    f.println("│   Show first N lines (default 10)                                   │");
+    f.println("│   Examples: head log.txt, head -n20 log.txt                         │");
+    f.println("│                                                                     │");
+    f.println("│ tail [-n<lines>] <file>                                             │");
+    f.println("│   Show last N lines (default 10)                                    │");
+    f.println("│   Examples: tail log.txt, tail -n50 log.txt                         │");
+    f.println("│                                                                     │");
+    f.println("│ grep <pattern> <file>                                               │");
+    f.println("│   Search for pattern in file (case-sensitive)                       │");
+    f.println("│   Usage: grep 'error' /log.txt                                      │");
+    f.println("│                                                                     │");
+    f.println("└─────────────────────────────────────────────────────────────────────┘");
     f.println("");
-    f.println("cat <file>");
-    f.println("  Display file contents");
-    f.println("  Usage: cat /readme.txt");
+    f.println("┌─────────────────────────────────────────────────────────────────────┐");
+    f.println("│ FILE CREATION & DELETION                                            │");
+    f.println("├─────────────────────────────────────────────────────────────────────┤");
+    f.println("│                                                                     │");
+    f.println("│ touch <file>                                                        │");
+    f.println("│   Create an empty file                                              │");
+    f.println("│   Usage: touch /newfile.txt                                         │");
+    f.println("│                                                                     │");
+    f.println("│ mkdir <dir>                                                         │");
+    f.println("│   Create a directory                                                │");
+    f.println("│   Usage: mkdir /newfolder                                           │");
+    f.println("│                                                                     │");
+    f.println("│ rm <file/dir>                                                       │");
+    f.println("│   Delete file or empty directory                                    │");
+    f.println("│   Usage: rm /oldfile.txt                                            │");
+    f.println("│                                                                     │");
+    f.println("│ rmdir <dir>                                                         │");
+    f.println("│   Delete empty directory                                            │");
+    f.println("│   Usage: rmdir /emptyfolder                                         │");
+    f.println("│                                                                     │");
+    f.println("└─────────────────────────────────────────────────────────────────────┘");
     f.println("");
-    f.println("head [-n<lines>] <file>");
-    f.println("  Show first N lines (default 10)");
-    f.println("  Usage: head -n5 /log.txt");
-    f.println("");
-    f.println("tail [-n<lines>] <file>");
-    f.println("  Show last N lines (default 10)");
-    f.println("  Usage: tail -n20 /history.txt");
-    f.println("");
-    f.println("grep <pattern> <file>");
-    f.println("  Search for pattern in file");
-    f.println("  Usage: grep 'error' /log.txt");
-    f.println("");
-    f.println("rm <file/dir>");
-    f.println("  Delete file or directory");
-    f.println("  Usage: rm /oldfile.txt");
-    f.println("");
-    f.println("touch <file>");
-    f.println("  Create empty file");
-    f.println("  Usage: touch /newfile.txt");
-    f.println("");
-    f.println("mkdir <dir>");
-    f.println("  Create directory");
-    f.println("  Usage: mkdir /newfolder");
-    f.println("");
-    f.println("edit, editor, nano");
-    f.println("  Open text editor");
-    f.println("  Usage: edit myfile.txt");
-    f.println("");
-    f.println("files, fm");
-    f.println("  Open file manager (GUI)");
-    f.println("  Usage: files");
+    f.println("┌─────────────────────────────────────────────────────────────────────┐");
+    f.println("│ FILE EDITING                                                        │");
+    f.println("├─────────────────────────────────────────────────────────────────────┤");
+    f.println("│                                                                     │");
+    f.println("│ edit, editor, nano <file>                                           │");
+    f.println("│   Open graphical text editor with on-screen keyboard                │");
+    f.println("│   Features: cursor movement, line numbers, copy/paste support      │");
+    f.println("│   Usage: edit myfile.txt                                            │");
+    f.println("│                                                                     │");
+    f.println("│ files, fm                                                           │");
+    f.println("│   Open graphical file manager (GUI)                                 │");
+    f.println("│   Features: browse, open, delete, rename, copy, move               │");
+    f.println("│   Usage: files                                                      │");
+    f.println("│                                                                     │");
+    f.println("└─────────────────────────────────────────────────────────────────────┘");
     f.close();
   }
 
-  // Netzwerk Hilfe
+  // ==================== NETWORK CATEGORY ====================
   SD.remove("/help_net.txt");
   f = SD.open("/help_net.txt", FILE_WRITE);
   if (f) {
-    f.println("═══════════════════════════════════════════════════════════");
-    f.println("NETWORK TOOLS");
-    f.println("═══════════════════════════════════════════════════════════");
+    f.println("╔══════════════════════════════════════════════════════════════════════╗");
+    f.println("║ NETWORK & WIFI TOOLS                                                 ║");
+    f.println("╚══════════════════════════════════════════════════════════════════════╝");
     f.println("");
-    f.println("ifconfig, ip");
-    f.println("  Show network configuration");
-    f.println("  Usage: ifconfig");
+    f.println("┌─────────────────────────────────────────────────────────────────────┐");
+    f.println("│ WIFI CONNECTION MANAGEMENT                                           │");
+    f.println("├─────────────────────────────────────────────────────────────────────┤");
+    f.println("│                                                                     │");
+    f.println("│ wifi, wifimanager                                                   │");
+    f.println("│   Open graphical WiFi manager                                       │");
+    f.println("│   Features: scan, connect, save networks                            │");
+    f.println("│   Usage: wifi                                                       │");
+    f.println("│                                                                     │");
+    f.println("│ scan, wifi-scan                                                     │");
+    f.println("│   Scan for available WiFi networks                                  │");
+    f.println("│   Shows: SSID, signal strength, encryption                          │");
+    f.println("│   Usage: scan                                                       │");
+    f.println("│                                                                     │");
+    f.println("│ wifi auto, autoconnect                                              │");
+    f.println("│   Automatically connect to best saved network                       │");
+    f.println("│   Usage: wifi auto                                                  │");
+    f.println("│                                                                     │");
+    f.println("│ wifi add <SSID> <PASSWORD>                                          │");
+    f.println("│   Connect and save a WiFi network                                   │");
+    f.println("│   Usage: wifi add MyWiFi mypassword                                 │");
+    f.println("│                                                                     │");
+    f.println("│ wifi list, savedwifi                                                │");
+    f.println("│   List all saved WiFi networks                                      │");
+    f.println("│   Usage: savedwifi                                                  │");
+    f.println("│                                                                     │");
+    f.println("│ wifi del <SSID>                                                     │");
+    f.println("│   Delete a saved WiFi network                                       │");
+    f.println("│   Usage: wifi del MyWiFi                                            │");
+    f.println("│                                                                     │");
+    f.println("│ wifi clear                                                          │");
+    f.println("│   Delete ALL saved WiFi networks                                    │");
+    f.println("│   Usage: wifi clear                                                 │");
+    f.println("│                                                                     │");
+    f.println("│ wifi on / wifi off                                                  │");
+    f.println("│   Enable or disable WiFi radio                                      │");
+    f.println("│   Usage: wifi on                                                    │");
+    f.println("│                                                                     │");
+    f.println("└─────────────────────────────────────────────────────────────────────┘");
     f.println("");
-    f.println("ping <host>");
-    f.println("  Test network connectivity");
-    f.println("  Usage: ping google.com");
+    f.println("┌─────────────────────────────────────────────────────────────────────┐");
+    f.println("│ NETWORK INFORMATION                                                 │");
+    f.println("├─────────────────────────────────────────────────────────────────────┤");
+    f.println("│                                                                     │");
+    f.println("│ ifconfig, ip                                                        │");
+    f.println("│   Show network configuration (IP, MAC, gateway, DNS)                │");
+    f.println("│   Usage: ifconfig                                                   │");
+    f.println("│                                                                     │");
+    f.println("│ wifistatus, wifi-status                                             │");
+    f.println("│   Detailed WiFi connection status with signal graph                 │");
+    f.println("│   Usage: wifistatus                                                 │");
+    f.println("│                                                                     │");
+    f.println("│ wifiscan                                                            │");
+    f.println("│   Graphical WiFi scanner with connection option                     │");
+    f.println("│   Usage: wifiscan                                                   │");
+    f.println("│                                                                     │");
+    f.println("└─────────────────────────────────────────────────────────────────────┘");
     f.println("");
-    f.println("wifi");
-    f.println("  WiFi connection manager");
-    f.println("  Usage: wifi");
+    f.println("┌─────────────────────────────────────────────────────────────────────┐");
+    f.println("│ FILE SERVER                                                         │");
+    f.println("├─────────────────────────────────────────────────────────────────────┤");
+    f.println("│                                                                     │");
+    f.println("│ fileserver, fs                                                      │");
+    f.println("│   Start web-based file server on port 8080                          │");
+    f.println("│   Access via: http://<IP>:8080                                      │");
+    f.println("│   Features: browse, upload, download, delete, rename               │");
+    f.println("│   Usage: fileserver                                                 │");
+    f.println("│                                                                     │");
+    f.println("│ fsstop, stopfs                                                      │");
+    f.println("│   Stop the file server                                              │");
+    f.println("│   Usage: fsstop                                                     │");
+    f.println("│                                                                     │");
+    f.println("│ fsstatus                                                            │");
+    f.println("│   Check if file server is running                                   │");
+    f.println("│   Usage: fsstatus                                                   │");
+    f.println("│                                                                     │");
+    f.println("│ setpwd <password>                                                   │");
+    f.println("│   Change file server admin password                                 │");
+    f.println("│   Usage: setpwd newpassword123                                      │");
+    f.println("│                                                                     │");
+    f.println("│ adpsw, adminpass                                                    │");
+    f.println("│   Graphical admin password manager                                  │");
+    f.println("│   Usage: adpsw                                                      │");
+    f.println("│                                                                     │");
+    f.println("└─────────────────────────────────────────────────────────────────────┘");
     f.println("");
-    f.println("wget <url>");
-    f.println("  Download file from internet");
-    f.println("  Usage: wget example.com/file.txt");
-    f.println("");
-    f.println("clock, time, zeit");
-    f.println("  Show current time via NTP");
-    f.println("  Usage: clock");
-    f.println("");
-    f.println("chat");
-    f.println("  Start chat application");
-    f.println("  Usage: chat");
+    f.println("┌─────────────────────────────────────────────────────────────────────┐");
+    f.println("│ NETWORK UTILITIES                                                   │");
+    f.println("├─────────────────────────────────────────────────────────────────────┤");
+    f.println("│                                                                     │");
+    f.println("│ ping <host>                                                         │");
+    f.println("│   Test network connectivity to a host                               │");
+    f.println("│   Usage: ping google.com                                            │");
+    f.println("│                                                                     │");
+    f.println("│ wget <url>                                                          │");
+    f.println("│   Download a file from the internet                                 │");
+    f.println("│   Usage: wget example.com/file.txt                                  │");
+    f.println("│                                                                     │");
+    f.println("│ clock, time, zeit                                                   │");
+    f.println("│   Show current date and time (requires WiFi)                        │");
+    f.println("│   Usage: clock                                                      │");
+    f.println("│                                                                     │");
+    f.println("│ chat                                                                │");
+    f.println("│   Simple chat application (host or client mode)                     │");
+    f.println("│   Usage: chat                                                       │");
+    f.println("│                                                                     │");
+    f.println("└─────────────────────────────────────────────────────────────────────┘");
     f.close();
   }
 
-  // Spiele Hilfe
+  // ==================== GAMES CATEGORY ====================
   SD.remove("/help_games.txt");
   f = SD.open("/help_games.txt", FILE_WRITE);
   if (f) {
-    f.println("═══════════════════════════════════════════════════════════");
-    f.println("GAMES & FUN");
-    f.println("═══════════════════════════════════════════════════════════");
+    f.println("╔══════════════════════════════════════════════════════════════════════╗");
+    f.println("║ GAMES & ENTERTAINMENT                                                ║");
+    f.println("╚══════════════════════════════════════════════════════════════════════╝");
     f.println("");
-    f.println("snake");
-    f.println("  Classic snake game");
-    f.println("  Controls: Touch left=left, right=right,");
-    f.println("            top=up, bottom=down");
-    f.println("  Usage: snake");
+    f.println("┌─────────────────────────────────────────────────────────────────────┐");
+    f.println("│ CLASSIC GAMES                                                       │");
+    f.println("├─────────────────────────────────────────────────────────────────────┤");
+    f.println("│                                                                     │");
+    f.println("│ snake                                                               │");
+    f.println("│   Classic Snake game - eat food, grow, avoid walls                  │");
+    f.println("│   Controls: Touch top/left/right/bottom of screen                   │");
+    f.println("│   Usage: snake                                                      │");
+    f.println("│                                                                     │");
+    f.println("│ pong                                                                │");
+    f.println("│   Pong game vs AI - move paddle to hit ball                         │");
+    f.println("│   Controls: Touch anywhere to move paddle                           │");
+    f.println("│   Usage: pong                                                       │");
+    f.println("│                                                                     │");
+    f.println("│ tictac, ttt                                                         │");
+    f.println("│   Tic-Tac-Toe vs AI opponent                                        │");
+    f.println("│   Controls: Touch grid cells to place X                             │");
+    f.println("│   Usage: tictac                                                     │");
+    f.println("│                                                                     │");
+    f.println("└─────────────────────────────────────────────────────────────────────┘");
     f.println("");
-    f.println("pong");
-    f.println("  Pong game vs AI");
-    f.println("  Controls: Touch to move paddle");
-    f.println("  Usage: pong");
+    f.println("┌─────────────────────────────────────────────────────────────────────┐");
+    f.println("│ CHIP-8 EMULATOR                                                     │");
+    f.println("├─────────────────────────────────────────────────────────────────────┤");
+    f.println("│                                                                     │");
+    f.println("│ chip8, chip-8                                                       │");
+    f.println("│   CHIP-8 game emulator - play classic games!                        │");
+    f.println("│                                                                     │");
+    f.println("│   Setup:                                                            │");
+    f.println("│     1. Copy .ch8 ROM files to SD card root                          │");
+    f.println("│     2. Run 'chip8' to see ROM list                                  │");
+    f.println("│     3. Select ROM and press LOAD                                    │");
+    f.println("│                                                                     │");
+    f.println("│   Controls:                                                         │");
+    f.println("│     Touch keypad on screen (1-F) for game input                     │");
+    f.println("│     SPEED button - change emulation speed                           │");
+    f.println("│     RST button - reset emulator                                     │");
+    f.println("│     ESC - exit emulator                                             │");
+    f.println("│                                                                     │");
+    f.println("│   Supported ROMs: .ch8, .CH8, .c8, .bin                             │");
+    f.println("│   Max ROM size: 3584 bytes                                          │");
+    f.println("│                                                                     │");
+    f.println("│   Popular ROMs (download online):                                   │");
+    f.println("│     - PONG, SPACE INVADERS, TETRIS                                  │");
+    f.println("│     - BREAKOUT, MAZE, BLINKY                                        │");
+    f.println("│                                                                     │");
+    f.println("└─────────────────────────────────────────────────────────────────────┘");
     f.println("");
-    f.println("tictac, ttt");
-    f.println("  Tic-Tac-Toe vs AI");
-    f.println("  Usage: tictac");
-    f.println("");
-    f.println("chip8, chip-8");
-    f.println("  CHIP-8 game emulator");
-    f.println("  Place .ch8 ROMs on SD card");
-    f.println("  Usage: chip8");
-    f.println("");
-    f.println("dice <sides>");
-    f.println("  Roll a dice with N sides");
-    f.println("  Usage: dice 20");
-    f.println("");
-    f.println("random [max]");
-    f.println("  Generate random number");
-    f.println("  Usage: random 100");
+    f.println("┌─────────────────────────────────────────────────────────────────────┐");
+    f.println("│ RANDOM FUN                                                          │");
+    f.println("├─────────────────────────────────────────────────────────────────────┤");
+    f.println("│                                                                     │");
+    f.println("│ dice <sides>                                                        │");
+    f.println("│   Roll a dice with N sides (1-100)                                  │");
+    f.println("│   Examples: dice 6, dice 20, dice 100                               │");
+    f.println("│                                                                     │");
+    f.println("│ random [max]                                                        │");
+    f.println("│   Generate a random number (0-max, default 1000)                    │");
+    f.println("│   Examples: random, random 100                                      │");
+    f.println("│                                                                     │");
+    f.println("└─────────────────────────────────────────────────────────────────────┘");
     f.close();
   }
 
-  // Apps Hilfe
+  // ==================== APPS CATEGORY ====================
   SD.remove("/help_apps.txt");
   f = SD.open("/help_apps.txt", FILE_WRITE);
   if (f) {
-    f.println("═══════════════════════════════════════════════════════════");
-    f.println("APPLICATIONS");
-    f.println("═══════════════════════════════════════════════════════════");
+    f.println("╔══════════════════════════════════════════════════════════════════════╗");
+    f.println("║ APPLICATIONS                                                         ║");
+    f.println("╚══════════════════════════════════════════════════════════════════════╝");
     f.println("");
-    f.println("calc, rechner");
-    f.println("  Scientific calculator");
-    f.println("  Modes: Standard, Scientific, Programmer");
-    f.println("  Usage: calc");
+    f.println("┌─────────────────────────────────────────────────────────────────────┐");
+    f.println("│ CALCULATOR                                                          │");
+    f.println("├─────────────────────────────────────────────────────────────────────┤");
+    f.println("│                                                                     │");
+    f.println("│ calc, rechner                                                       │");
+    f.println("│   Scientific calculator with 3 modes                                │");
+    f.println("│                                                                     │");
+    f.println("│   Modes:                                                            │");
+    f.println("│     STD - Basic arithmetic (+, -, *, /)                             │");
+    f.println("│     SCI - Scientific functions (sin, cos, tan, log, sqrt, etc)      │");
+    f.println("│     PROG - Programmer mode (AND, OR, XOR, SHIFT, BIN, HEX, DEC)     │");
+    f.println("│                                                                     │");
+    f.println("│   Features:                                                         │");
+    f.println("│     Memory (M+, M-, MR, MC)                                         │");
+    f.println("│     Constants (π, e)                                                │");
+    f.println("│     Power functions (x², x³, xʸ, eˣ, 10ˣ)                          │");
+    f.println("│                                                                     │");
+    f.println("│   Usage: calc                                                       │");
+    f.println("│                                                                     │");
+    f.println("└─────────────────────────────────────────────────────────────────────┘");
     f.println("");
-    f.println("draw, paint");
-    f.println("  Drawing application");
-    f.println("  Features: 32 colors, RGB mixer,");
-    f.println("            8 tools, 6 brush sizes");
-    f.println("  Usage: draw");
+    f.println("┌─────────────────────────────────────────────────────────────────────┐");
+    f.println("│ DRAWING APP                                                         │");
+    f.println("├─────────────────────────────────────────────────────────────────────┤");
+    f.println("│                                                                     │");
+    f.println("│ draw, paint                                                         │");
+    f.println("│   Full-featured drawing application                                 │");
+    f.println("│                                                                     │");
+    f.println("│   Tools:                                                            │");
+    f.println("│     BRUSH, LINE, RECT, CIRCLE, FILL, ERASER, PICKER, TEXT           │");
+    f.println("│                                                                     │");
+    f.println("│   Colors:                                                           │");
+    f.println("│     32 predefined colors + RGB mixer                                │");
+    f.println("│                                                                     │");
+    f.println("│   Brush sizes: 1-6 pixels                                           │");
+    f.println("│                                                                     │");
+    f.println("│   Usage: draw                                                       │");
+    f.println("│                                                                     │");
+    f.println("└─────────────────────────────────────────────────────────────────────┘");
     f.println("");
-    f.println("notes");
-    f.println("  Note-taking app");
-    f.println("  Usage: notes");
+    f.println("┌─────────────────────────────────────────────────────────────────────┐");
+    f.println("│ QR CODE GENERATOR                                                   │");
+    f.println("├─────────────────────────────────────────────────────────────────────┤");
+    f.println("│                                                                     │");
+    f.println("│ qr, qrcode                                                          │");
+    f.println("│   Generate QR codes from text, URLs, WiFi, or vCards                │");
+    f.println("│                                                                     │");
+    f.println("│   Modes:                                                            │");
+    f.println("│     TEXT - Any text message                                         │");
+    f.println("│     URL - Website link (auto-adds http://)                          │");
+    f.println("│     WIFI - WiFi credentials (SSID:PASSWORD)                         │");
+    f.println("│     VCARD - Contact info (Name:Tel:Email)                           │");
+    f.println("│                                                                     │");
+    f.println("│   Usage: qr                                                         │");
+    f.println("│                                                                     │");
+    f.println("└─────────────────────────────────────────────────────────────────────┘");
     f.println("");
-    f.println("todo");
-    f.println("  To-do list manager");
-    f.println("  Usage: todo");
+    f.println("┌─────────────────────────────────────────────────────────────────────┐");
+    f.println("│ PRODUCTIVITY APPS                                                   │");
+    f.println("├─────────────────────────────────────────────────────────────────────┤");
+    f.println("│                                                                     │");
+    f.println("│ todo                                                                │");
+    f.println("│   To-do list manager with save/load                                 │");
+    f.println("│   Features: add, delete, toggle done                                │");
+    f.println("│   Usage: todo                                                       │");
+    f.println("│                                                                     │");
+    f.println("│ timer                                                               │");
+    f.println("│   Countdown timer with start/pause/reset                            │");
+    f.println("│   Usage: timer                                                      │");
+    f.println("│                                                                     │");
+    f.println("│ notes                                                               │");
+    f.println("│   Simple note-taking app (placeholder)                              │");
+    f.println("│   Usage: notes                                                      │");
+    f.println("│                                                                     │");
+    f.println("└─────────────────────────────────────────────────────────────────────┘");
     f.println("");
-    f.println("timer");
-    f.println("  Countdown timer");
-    f.println("  Usage: timer");
+    f.println("┌─────────────────────────────────────────────────────────────────────┐");
+    f.println("│ TEXT EDITOR                                                         │");
+    f.println("├─────────────────────────────────────────────────────────────────────┤");
+    f.println("│                                                                     │");
+    f.println("│ edit, editor, nano <filename>                                       │");
+    f.println("│   Full-featured text editor with on-screen keyboard                 │");
+    f.println("│                                                                     │");
+    f.println("│   Features:                                                         │");
+    f.println("│     - Cursor movement (arrow buttons)                               │");
+    f.println("│     - Line numbers                                                  │");
+    f.println("│     - Insert/delete characters                                      │");
+    f.println("│     - Save/Load files                                               │");
+    f.println("│     - Visual feedback                                               │");
+    f.println("│                                                                     │");
+    f.println("│   Usage: edit myfile.txt                                            │");
+    f.println("│                                                                     │");
+    f.println("└─────────────────────────────────────────────────────────────────────┘");
     f.close();
   }
 
-  // I2C Hilfe
+  // ==================== I2C CATEGORY ====================
   SD.remove("/help_i2c.txt");
   f = SD.open("/help_i2c.txt", FILE_WRITE);
   if (f) {
-    f.println("═══════════════════════════════════════════════════════════");
-    f.println("I2C BUS TOOLS");
-    f.println("═══════════════════════════════════════════════════════════");
+    f.println("╔══════════════════════════════════════════════════════════════════════╗");
+    f.println("║ I2C BUS TOOLS                                                        ║");
+    f.println("╚══════════════════════════════════════════════════════════════════════╝");
     f.println("");
-    f.println("i2c, i2cscan");
-    f.println("  Scan I2C bus for devices");
-    f.println("  Usage: i2cscan");
+    f.println("┌─────────────────────────────────────────────────────────────────────┐");
+    f.println("│ HARDWARE INFO                                                       │");
+    f.println("├─────────────────────────────────────────────────────────────────────┤");
+    f.println("│                                                                     │");
+    f.println("│   I2C Pins: SDA = GPIO16, SCL = GPIO39                              │");
+    f.println("│   Voltage: 3.3V (use level shifters for 5V devices)                 │");
+    f.println("│                                                                     │");
+    f.println("└─────────────────────────────────────────────────────────────────────┘");
     f.println("");
-    f.println("i2ctool");
-    f.println("  Open graphical I2C tool");
-    f.println("  Usage: i2ctool");
+    f.println("┌─────────────────────────────────────────────────────────────────────┐");
+    f.println("│ SCANNING & DISCOVERY                                                │");
+    f.println("├─────────────────────────────────────────────────────────────────────┤");
+    f.println("│                                                                     │");
+    f.println("│ i2c, i2cscan                                                        │");
+    f.println("│   Scan I2C bus for connected devices                                │");
+    f.println("│   Shows all addresses (0x01-0x7F) that respond                      │");
+    f.println("│   Usage: i2cscan                                                    │");
+    f.println("│                                                                     │");
+    f.println("│ i2ctool                                                             │");
+    f.println("│   Graphical I2C tool with menu interface                            │");
+    f.println("│   Features: scan, send, read, register operations                   │");
+    f.println("│   Usage: i2ctool                                                    │");
+    f.println("│                                                                     │");
+    f.println("└─────────────────────────────────────────────────────────────────────┘");
     f.println("");
-    f.println("i2csend <addr> <data>");
-    f.println("  Send data to I2C device");
-    f.println("  Usage: i2csend 3C Hello");
-    f.println("  Usage: i2csend 3C 0x48656C6C6F");
+    f.println("┌─────────────────────────────────────────────────────────────────────┐");
+    f.println("│ DATA TRANSFER                                                       │");
+    f.println("├─────────────────────────────────────────────────────────────────────┤");
+    f.println("│                                                                     │");
+    f.println("│ i2csend <addr> <data>                                               │");
+    f.println("│   Send data to I2C device                                           │");
+    f.println("│   Data can be text or hex (0x prefix)                               │");
+    f.println("│   Examples:                                                         │");
+    f.println("│     i2csend 3C Hello World                                          │");
+    f.println("│     i2csend 3C 0x48656C6C6F                                         │");
+    f.println("│                                                                     │");
+    f.println("│ i2cread <addr> <bytes>                                              │");
+    f.println("│   Read specified bytes from I2C device                              │");
+    f.println("│   Usage: i2cread 3C 10                                              │");
+    f.println("│                                                                     │");
+    f.println("└─────────────────────────────────────────────────────────────────────┘");
     f.println("");
-    f.println("i2cread <addr> <bytes>");
-    f.println("  Read bytes from I2C device");
-    f.println("  Usage: i2cread 3C 10");
+    f.println("┌─────────────────────────────────────────────────────────────────────┐");
+    f.println("│ REGISTER OPERATIONS                                                 │");
+    f.println("├─────────────────────────────────────────────────────────────────────┤");
+    f.println("│                                                                     │");
+    f.println("│ i2cwrite <addr> <reg> <data>                                        │");
+    f.println("│   Write data to a specific register                                 │");
+    f.println("│   Usage: i2cwrite 3C 00 01                                          │");
+    f.println("│                                                                     │");
+    f.println("│ i2cregread <addr> <reg> <bytes>                                     │");
+    f.println("│   Read bytes from a specific register                               │");
+    f.println("│   Usage: i2cregread 3C 00 5                                         │");
+    f.println("│                                                                     │");
+    f.println("└─────────────────────────────────────────────────────────────────────┘");
     f.println("");
-    f.println("i2cwrite <addr> <reg> <data>");
-    f.println("  Write to I2C register");
-    f.println("  Usage: i2cwrite 3C 00 01");
-    f.println("");
-    f.println("I2C Pins: SDA=GPIO16, SCL=GPIO39");
+    f.println("┌─────────────────────────────────────────────────────────────────────┐");
+    f.println("│ COMMON I2C DEVICES                                                  │");
+    f.println("├─────────────────────────────────────────────────────────────────────┤");
+    f.println("│                                                                     │");
+    f.println("│   0x27 / 0x3F   - LCD 1602/2004 (PCF8574)                           │");
+    f.println("│   0x3C / 0x3D   - OLED Display (SSD1306)                            │");
+    f.println("│   0x68          - RTC DS3231 / MPU6050                              │");
+    f.println("│   0x57          - EEPROM 24Cxx                                      │");
+    f.println("│   0x40          - PCA9685 PWM servo driver                          │");
+    f.println("│   0x76 / 0x77   - BME280 temperature/pressure sensor                │");
+    f.println("│                                                                     │");
+    f.println("└─────────────────────────────────────────────────────────────────────┘");
     f.close();
   }
 
-  // Developer Tools
+  // ==================== DEVELOPER CATEGORY ====================
   SD.remove("/help_dev.txt");
   f = SD.open("/help_dev.txt", FILE_WRITE);
   if (f) {
-    f.println("═══════════════════════════════════════════════════════════");
-    f.println("DEVELOPER TOOLS");
-    f.println("═══════════════════════════════════════════════════════════");
+    f.println("╔══════════════════════════════════════════════════════════════════════╗");
+    f.println("║ DEVELOPER TOOLS                                                      ║");
+    f.println("╚══════════════════════════════════════════════════════════════════════╝");
     f.println("");
-    f.println("echo <text>");
-    f.println("  Print text to terminal");
-    f.println("  Variables: $TIME, $FREE, $UPTIME");
-    f.println("  Usage: echo Hello World");
+    f.println("┌─────────────────────────────────────────────────────────────────────┐");
+    f.println("│ TEXT OUTPUT                                                         │");
+    f.println("├─────────────────────────────────────────────────────────────────────┤");
+    f.println("│                                                                     │");
+    f.println("│ echo <text>                                                         │");
+    f.println("│   Print text to terminal                                            │");
+    f.println("│   Variables: $TIME, $FREE, $UPTIME, $HEAP                          │");
+    f.println("│   Examples:                                                         │");
+    f.println("│     echo Hello World                                                 │");
+    f.println("│     echo Free RAM: $FREE bytes                                      │");
+    f.println("│                                                                     │");
+    f.println("└─────────────────────────────────────────────────────────────────────┘");
     f.println("");
-    f.println("eval <expression>");
-    f.println("  Evaluate math expression");
-    f.println("  Usage: eval 2+2");
+    f.println("┌─────────────────────────────────────────────────────────────────────┐");
+    f.println("│ MATH & EVALUATION                                                   │");
+    f.println("├─────────────────────────────────────────────────────────────────────┤");
+    f.println("│                                                                     │");
+    f.println("│ eval <expression>                                                   │");
+    f.println("│   Evaluate mathematical expression                                  │");
+    f.println("│   Supports: + - * / ^ ( ) sqrt() sin() cos() tan()                  │");
+    f.println("│   Examples:                                                         │");
+    f.println("│     eval 2+2                                                        │");
+    f.println("│     eval sqrt(16)                                                   │");
+    f.println("│     eval sin(30)                                                    │");
+    f.println("│                                                                     │");
+    f.println("└─────────────────────────────────────────────────────────────────────┘");
     f.println("");
-    f.println("delay, sleep <ms>");
-    f.println("  Wait for milliseconds");
-    f.println("  Usage: delay 1000");
+    f.println("┌─────────────────────────────────────────────────────────────────────┐");
+    f.println("│ UTILITIES                                                           │");
+    f.println("├─────────────────────────────────────────────────────────────────────┤");
+    f.println("│                                                                     │");
+    f.println("│ delay, sleep <ms>                                                   │");
+    f.println("│   Wait for specified milliseconds (max 10000ms)                     │");
+    f.println("│   Usage: delay 1000                                                 │");
+    f.println("│                                                                     │");
+    f.println("│ colors                                                              │");
+    f.println("│   List all available TFT color constants                            │");
+    f.println("│   Usage: colors                                                     │");
+    f.println("│                                                                     │");
+    f.println("└─────────────────────────────────────────────────────────────────────┘");
     f.close();
   }
 
-  // Tips & Tricks
+  // ==================== TIPS CATEGORY ====================
   SD.remove("/help_tips.txt");
   f = SD.open("/help_tips.txt", FILE_WRITE);
   if (f) {
-    f.println("═══════════════════════════════════════════════════════════");
-    f.println("TIPS & TRICKS");
-    f.println("═══════════════════════════════════════════════════════════");
+    f.println("╔══════════════════════════════════════════════════════════════════════╗");
+    f.println("║ TIPS & TRICKS                                                        ║");
+    f.println("╚══════════════════════════════════════════════════════════════════════╝");
     f.println("");
-    f.println("KEYBOARD SHORTCUTS:");
-    f.println("  ^ button     = Shift (uppercase)");
-    f.println("  123 button   = Numbers");
-    f.println("  §$% button   = Special characters");
-    f.println("  OK button    = Enter/Execute");
-    f.println("  < button     = Backspace");
+    f.println("┌─────────────────────────────────────────────────────────────────────┐");
+    f.println("│ TOUCH KEYBOARD SHORTCUTS                                            │");
+    f.println("├─────────────────────────────────────────────────────────────────────┤");
+    f.println("│                                                                     │");
+    f.println("│   ^ button      - Shift (uppercase letters)                         │");
+    f.println("│   123 button    - Numbers and basic symbols                         │");
+    f.println("│   §$% button    - Special characters and symbols                    │");
+    f.println("│   OK button     - Enter/Execute command                             │");
+    f.println("│   < button      - Backspace / Delete                                │");
+    f.println("│   SPACE bar     - Space character                                   │");
+    f.println("│                                                                     │");
+    f.println("│   ▲ button (right) - Scroll terminal up                             │");
+    f.println("│   ▼ button (right) - Scroll terminal down                           │");
+    f.println("│   ESC button (top-right) - Exit current app                         │");
+    f.println("│                                                                     │");
+    f.println("└─────────────────────────────────────────────────────────────────────┘");
     f.println("");
-    f.println("TERMINAL FEATURES:");
-    f.println("  Scroll up/down: Use ▲▼ buttons on right");
-    f.println("  ESC: Top-right corner");
-    f.println("  Commands are case-insensitive");
+    f.println("┌─────────────────────────────────────────────────────────────────────┐");
+    f.println("│ TERMINAL FEATURES                                                   │");
+    f.println("├─────────────────────────────────────────────────────────────────────┤");
+    f.println("│                                                                     │");
+    f.println("│   • Commands are case-insensitive (HELP = help)                     │");
+    f.println("│   • Press ESC at any time to return to terminal                     │");
+    f.println("│   • Scroll through command history using ▲▼ buttons                 │");
+    f.println("│   • Terminal shows last 40 lines                                    │");
+    f.println("│   • File paths can use / or start with /                            │");
+    f.println("│                                                                     │");
+    f.println("└─────────────────────────────────────────────────────────────────────┘");
     f.println("");
-    f.println("CHIP-8 EMULATOR:");
-    f.println("  Place .ch8 ROMs in root of SD card");
-    f.println("  Keypad: 1-9, A-F on screen");
-    f.println("  SPEED button changes emulation speed");
+    f.println("┌─────────────────────────────────────────────────────────────────────┐");
+    f.println("│ CHIP-8 EMULATOR TIPS                                                │");
+    f.println("├─────────────────────────────────────────────────────────────────────┤");
+    f.println("│                                                                     │");
+    f.println("│   • Place .ch8 ROM files in SD card root                            │");
+    f.println("│   • Some ROMs require different speed settings                      │");
+    f.println("│   • Use SPEED button to adjust emulation speed                      │");
+    f.println("│   • RST button resets the emulator                                  │");
+    f.println("│   • Keypad layout mimics original CHIP-8                            │");
+    f.println("│                                                                     │");
+    f.println("└─────────────────────────────────────────────────────────────────────┘");
     f.println("");
-    f.println("TROUBLESHOOTING:");
-    f.println("  Screen freezes: Press RST button");
-    f.println("  SD not detected: Check FAT32 format");
-    f.println("  Touch not working: Check wiring");
-    f.println("  I2C issues: Run 'i2cscan' first");
+    f.println("┌─────────────────────────────────────────────────────────────────────┐");
+    f.println("│ WIFI & NETWORK TIPS                                                 │");
+    f.println("├─────────────────────────────────────────────────────────────────────┤");
+    f.println("│                                                                     │");
+    f.println("│   • Use 'scan' to find networks before connecting                   │");
+    f.println("│   • Saved networks persist after reboot                             │");
+    f.println("│   • File server requires active WiFi connection                     │");
+    f.println("│   • Default admin password: admin123 (change with 'setpwd')         │");
+    f.println("│   • Use 'wifi auto' to auto-connect to best saved network           │");
+    f.println("│                                                                     │");
+    f.println("└─────────────────────────────────────────────────────────────────────┘");
+    f.println("");
+    f.println("┌─────────────────────────────────────────────────────────────────────┐");
+    f.println("│ TROUBLESHOOTING                                                     │");
+    f.println("├─────────────────────────────────────────────────────────────────────┤");
+    f.println("│                                                                     │");
+    f.println("│   Issue: Screen freezes or unresponsive                             │");
+    f.println("│   Fix: Press RST button on ESP32 board                              │");
+    f.println("│                                                                     │");
+    f.println("│   Issue: SD card not detected                                       │");
+    f.println("│   Fix: Check FAT32 format, re-insert card, check wiring             │");
+    f.println("│                                                                     │");
+    f.println("│   Issue: Touch not responding                                       │");
+    f.println("│   Fix: Check XPT2046 connections, reset device                     │");
+    f.println("│                                                                     │");
+    f.println("│   Issue: I2C device not found                                       │");
+    f.println("│   Fix: Run 'i2cscan' first, check wiring and pull-up resistors      │");
+    f.println("│                                                                     │");
+    f.println("│   Issue: Cannot connect to WiFi                                     │");
+    f.println("│   Fix: Check password, signal strength, try 'scan' first            │");
+    f.println("│                                                                     │");
+    f.println("└─────────────────────────────────────────────────────────────────────┘");
     f.close();
   }
 
-  printToConsole(successPrefix + "Help system ready!", TFT_GREEN);
-  printToConsole(infoPrefix + "Type 'help' for overview", TFT_BLUE);
+  printToConsole(successPrefix + "Enhanced help system created!", TFT_GREEN);
+  printToConsole(infoPrefix + "Categories: system, files, net, games, apps, i2c, dev, tips, all", TFT_BLUE);
+}
+
+// ==================== IMPROVED MAN COMMAND ====================
+// Ersetze in der loop() die man-Befehl Handler
+
+// Füge diese Funktion vor der loop() ein:
+void manualPage(String command) {
+  command.toLowerCase();
+
+  // Define command manuals
+  struct CommandManual {
+    String cmd;
+    String title;
+    String syntax;
+    String description;
+    String examples;
+    String notes;
+  };
+
+  std::vector<CommandManual> manuals = {
+    { "ls", "List Directory Contents",
+      "ls [path]",
+      "Lists all files and directories in the specified path.\nIf no path is given, lists the current directory.",
+      "  ls           - List current directory\n  ls /         - List root directory\n  ls /folder   - List specific folder",
+      "Directories are shown with [DIR] prefix.\nFiles are shown with [FILE] prefix." },
+
+    { "cat", "Display File Contents",
+      "cat <filename>",
+      "Displays the contents of a text file on the terminal.\nShows first 20 lines for large files.",
+      "  cat readme.txt     - Show contents of readme.txt\n  cat /config/settings.txt",
+      "Use head/tail for large files.\nBinary files may display garbled text." },
+
+    { "grep", "Search File for Pattern",
+      "grep \"pattern\" <filename>",
+      "Searches the specified file for lines containing the pattern.",
+      "  grep \"error\" log.txt     - Find error lines\n  grep \"192.168\" network.log",
+      "Pattern is case-sensitive.\nUse quotes for patterns with spaces." },
+
+    { "edit", "Text Editor",
+      "edit <filename>",
+      "Opens the graphical text editor with on-screen keyboard.\nCreate new file or edit existing one.",
+      "  edit mynotes.txt    - Edit or create mynotes.txt\n  edit /config/settings.cfg",
+      "Save with top-left button.\nExit with ESC button." },
+
+    { "scan", "WiFi Scanner",
+      "scan",
+      "Scans for available WiFi networks and displays them with signal strength.\nTouch a network to connect.",
+      "  scan",
+      "Shows encryption type and signal bars.\nTouch network to connect." },
+
+    { "chip8", "CHIP-8 Emulator",
+      "chip8",
+      "Starts the CHIP-8 game emulator.\nRequires .ch8 ROM files on SD card.",
+      "  chip8",
+      "Place ROMs in SD root.\nUse SPEED button for different speeds." },
+
+    { "calc", "Calculator",
+      "calc",
+      "Opens scientific calculator with Standard, Scientific, and Programmer modes.",
+      "  calc",
+      "Touch mode buttons to switch.\nHas memory functions (M+, M-, MR, MC)." },
+
+    { "draw", "Drawing Application",
+      "draw",
+      "Opens full-featured drawing app with 32 colors and 8 tools.",
+      "  draw",
+      "Select color from palette or RGB mixer.\nUse brush, line, rect, circle, fill, eraser, picker, or text tools." },
+
+    { "qr", "QR Code Generator",
+      "qr",
+      "Create QR codes for text, URLs, WiFi credentials, or vCards.",
+      "  qr",
+      "Select mode (TEXT/URL/WIFI/VCARD), enter data, generate QR code." },
+
+    { "fileserver", "Web File Server",
+      "fileserver",
+      "Starts web-based file manager accessible via browser.\nPort: 8080",
+      "  fileserver",
+      "Access at http://<ESP32_IP>:8080\nDefault password: admin123\nUse setpwd to change password." },
+
+    { "i2cscan", "I2C Bus Scanner",
+      "i2cscan",
+      "Scans I2C bus for connected devices and shows their addresses.",
+      "  i2cscan",
+      "I2C pins: SDA=GPIO16, SCL=GPIO39\nUse 3.3V devices or level shifters." },
+
+    { "snake", "Snake Game",
+      "snake",
+      "Classic snake game - eat food, grow longer, avoid walls and yourself.",
+      "  snake",
+      "Controls: Touch top=up, bottom=down, left=left, right=right." },
+
+    { "pong", "Pong Game",
+      "pong",
+      "Pong game vs AI opponent - hit the ball with your paddle.",
+      "  pong",
+      "Controls: Touch anywhere to move paddle vertically." },
+
+    { "tictac", "Tic-Tac-Toe",
+      "tictac",
+      "Tic-Tac-Toe game against AI opponent.",
+      "  tictac",
+      "Controls: Touch grid cells to place X." }
+  };
+
+  bool found = false;
+
+  for (const auto& manual : manuals) {
+    if (manual.cmd == command) {
+      found = true;
+
+      printToConsole("");
+      printToConsole("╔══════════════════════════════════════════════════════════════╗", TFT_CYAN);
+      printToConsole("║ MANUAL: " + manual.title + String(52 - manual.title.length(), ' ') + "║", TFT_CYAN);
+      printToConsole("╚══════════════════════════════════════════════════════════════╝", TFT_CYAN);
+      printToConsole("");
+
+      printToConsole("SYNTAX", TFT_YELLOW);
+      printToConsole("  " + manual.syntax, TFT_GREEN);
+      printToConsole("");
+
+      printToConsole("DESCRIPTION", TFT_YELLOW);
+      printToConsole("  " + manual.description, TFT_WHITE);
+      printToConsole("");
+
+      printToConsole("EXAMPLES", TFT_YELLOW);
+      // Split examples by newline
+      String examples = manual.examples;
+      int start = 0;
+      int end = examples.indexOf('\n');
+      while (end >= 0) {
+        printToConsole(examples.substring(start, end), TFT_GREEN);
+        start = end + 1;
+        end = examples.indexOf('\n', start);
+      }
+      if (start < examples.length()) {
+        printToConsole(examples.substring(start), TFT_GREEN);
+      }
+      printToConsole("");
+
+      if (manual.notes.length() > 0) {
+        printToConsole("NOTES", TFT_YELLOW);
+        String notes = manual.notes;
+        start = 0;
+        end = notes.indexOf('\n');
+        while (end >= 0) {
+          printToConsole("  " + notes.substring(start, end), TFT_BLUE);
+          start = end + 1;
+          end = notes.indexOf('\n', start);
+        }
+        if (start < notes.length()) {
+          printToConsole("  " + notes.substring(start), TFT_BLUE);
+        }
+        printToConsole("");
+      }
+
+      break;
+    }
+  }
+
+  if (!found) {
+    printToConsole(errorPrefix + "No manual entry for: " + command, TFT_RED);
+    printToConsole(infoPrefix + "Try 'help' to see available commands", TFT_BLUE);
+  }
 }
 
 
@@ -5437,12 +5577,22 @@ void wifiScanner() {
 }
 
 // ==================== VOLLSTÄNDIGE LOOP() OHNE HUE ====================
+// ==================== VOLLSTÄNDIGE LOOP() MIT ALLEN BEFEHLEN ====================
+
+unsigned long lastFileServerCheck = 0;
+
 void loop() {
   // Cursor blinken lassen
   if (millis() - lastCursorBlink > 500) {
     cursorVisible = !cursorVisible;
     lastCursorBlink = millis();
     updateInputLine(false);
+  }
+
+  // File Server regelmäßig bedienen (wenn aktiv)
+  if (fileServerRunning && millis() - lastFileServerCheck > 10) {
+    handleFileServer();
+    lastFileServerCheck = millis();
   }
 
   String cmd = handleKeyboardInput();
@@ -5526,38 +5676,9 @@ void loop() {
       }
     }
 
-    // Man-Page System
     else if (lowCmd.startsWith("man ")) {
       String searchTerm = lowCmd.substring(4);
-      String helpFiles[] = { "help_sys.txt", "help_files.txt", "help_net.txt",
-                             "help_games.txt", "help_apps.txt", "help_i2c.txt", "help_dev.txt" };
-      bool found = false;
-
-      for (String hf : helpFiles) {
-        File f = SD.open("/" + hf);
-        if (f) {
-          while (f.available()) {
-            String line = f.readStringUntil('\n');
-            line.replace("\r", "");
-
-            if (line.startsWith(searchTerm) || line.indexOf(searchTerm + " ") >= 0) {
-              if (!found) {
-                printToConsole("");
-                printToConsole("MANUAL: " + searchTerm, TFT_CYAN);
-                printToConsole("═══════════════════════════════", TFT_CYAN);
-              }
-              found = true;
-              printToConsole(line, TFT_GREEN);
-            }
-          }
-          f.close();
-        }
-      }
-
-      if (!found) {
-        printToConsole(errorPrefix + "No manual entry for: " + searchTerm, TFT_RED);
-        printToConsole(infoPrefix + "Try 'help' for available commands", TFT_BLUE);
-      }
+      manualPage(searchTerm);
     }
 
     // ==================== SYSTEM BEFEHLE ====================
@@ -5608,6 +5729,7 @@ void loop() {
       printToConsole("2    running   touchdriver");
       printToConsole("3    sleeping  idle");
       printToConsole("4    waiting   watchdog");
+      if (fileServerRunning) printToConsole("5    running   fileserver");
     }
 
     else if (lowCmd == "neofetch") {
@@ -5624,6 +5746,13 @@ void loop() {
       printToConsole("RAM: " + String(ESP.getFreeHeap() / 1024) + "KB / " + String(ESP.getHeapSize() / 1024) + "KB", TFT_GREEN);
       printToConsole("Theme: " + String(darkMode ? "Dark" : "Light"), TFT_GREEN);
       printToConsole("Sound: " + String(soundEnabled ? "ON" : "OFF"), TFT_GREEN);
+      if (WiFi.status() == WL_CONNECTED) {
+        printToConsole("WiFi: Connected to " + WiFi.SSID(), TFT_GREEN);
+        printToConsole("IP: " + WiFi.localIP().toString(), TFT_GREEN);
+      }
+      if (fileServerRunning) {
+        printToConsole("File Server: Running on port 8080", TFT_GREEN);
+      }
     }
 
     else if (lowCmd == "sysinfo" || lowCmd == "stats") {
@@ -5648,17 +5777,6 @@ void loop() {
       if (soundEnabled) playSysSound(1);
       EEPROM.write(0, soundEnabled);
       EEPROM.commit();
-    }
-
-    else if (lowCmd == "colors") {
-      printToConsole("Available Colors:", TFT_CYAN);
-      printToConsole("black, navy, dkgreen, dkcyan");
-      printToConsole("maroon, purple, olive, grey");
-      printToConsole("dkgrey, blue, green, cyan");
-      printToConsole("red, magenta, yellow, white");
-      printToConsole("orange, lime, pink, brown");
-      printToConsole("gold, silver, sky, violet");
-      printToConsole("coral, mint, sand, salmon");
     }
 
     // ==================== CLOCK / ZEIT ====================
@@ -5714,57 +5832,6 @@ void loop() {
       }
     }
 
-    else if (lowCmd.startsWith("head ")) {
-      int lines = 10;
-      String rest = lowCmd.substring(5);
-      String filename;
-
-      if (rest.startsWith("-n")) {
-        int spacePos = rest.indexOf(' ');
-        lines = rest.substring(2, spacePos).toInt();
-        filename = rest.substring(spacePos + 1);
-      } else {
-        filename = rest;
-      }
-
-      File f = SD.open(filename);
-      if (f) {
-        printToConsole("First " + String(lines) + " lines of " + filename + ":", TFT_CYAN);
-        for (int i = 0; i < lines && f.available(); i++) {
-          printToConsole(f.readStringUntil('\n'));
-        }
-        f.close();
-      } else {
-        printToConsole(errorPrefix + "File not found", TFT_RED);
-      }
-    }
-
-    else if (lowCmd.startsWith("tail ")) {
-      int lines = 10;
-      String rest = lowCmd.substring(5);
-      String filename = rest;
-
-      if (rest.startsWith("-n")) {
-        int spacePos = rest.indexOf(' ');
-        lines = rest.substring(2, spacePos).toInt();
-        filename = rest.substring(spacePos + 1);
-      }
-
-      std::vector<String> allLines;
-      File f = SD.open(filename);
-      if (f) {
-        while (f.available()) allLines.push_back(f.readStringUntil('\n'));
-        f.close();
-
-        printToConsole("Last " + String(lines) + " lines of " + filename + ":", TFT_CYAN);
-        int start = max(0, (int)allLines.size() - lines);
-        for (int i = start; i < allLines.size(); i++) {
-          printToConsole(allLines[i]);
-        }
-      } else {
-        printToConsole(errorPrefix + "File not found", TFT_RED);
-      }
-    }
 
     else if (lowCmd.startsWith("grep ")) {
       String rest = lowCmd.substring(5);
@@ -5822,7 +5889,7 @@ void loop() {
       }
     }
 
-    // ==================== NETZWERK & WIFI ====================
+    // ==================== NETZWERK & WIFI (ERWEITERT) ====================
     else if (lowCmd == "ifconfig" || lowCmd == "ip") {
       printToConsole("Network Configuration:", TFT_CYAN);
       if (WiFi.status() == WL_CONNECTED) {
@@ -5906,22 +5973,68 @@ void loop() {
       }
     }
 
+    // ==================== ERWEITERTE WIFI BEFEHLE ====================
     else if (lowCmd == "wifi") {
-      wifiManager();
+      wifiManagerEnhanced();
     }
 
-    // ==================== WIFI SCANNER BEFEHLE ====================
+    else if (lowCmd == "wifi auto" || lowCmd == "autoconnect") {
+      autoConnectWiFi();
+    }
+
+    else if (lowCmd == "wifi list" || lowCmd == "savedwifi") {
+      listSavedWiFi();
+    }
+
+    else if (lowCmd.startsWith("wifi add ")) {
+      String rest = lowCmd.substring(8);
+      int spacePos = rest.indexOf(' ');
+      if (spacePos > 0) {
+        String ssid = rest.substring(0, spacePos);
+        String pwd = rest.substring(spacePos + 1);
+        connectAndSaveWiFi(ssid, pwd);
+      } else {
+        printToConsole(errorPrefix + "Usage: wifi add <SSID> <PASSWORD>", TFT_RED);
+      }
+    }
+
+    else if (lowCmd.startsWith("wifi del ")) {
+      String ssid = lowCmd.substring(9);
+      deleteSavedWiFi(ssid);
+    }
+
+    else if (lowCmd == "wifi clear") {
+      printToConsole(infoPrefix + "Delete ALL saved WiFis? (y/n)", TFT_YELLOW);
+      String confirm = getTextInput();
+      if (confirm == "y" || confirm == "yes") {
+        for (int i = 0; i < MAX_SAVED_WIFIS; i++) {
+          savedNetworks[i].valid = false;
+        }
+        saveSavedWiFi();
+        WiFi.disconnect();
+        printToConsole(successPrefix + "All saved WiFis cleared!", TFT_GREEN);
+      } else {
+        printToConsole(infoPrefix + "Cancelled", TFT_BLUE);
+      }
+    }
+
+    else if (lowCmd == "wifi off" || lowCmd == "wifioff") {
+      WiFi.disconnect(true);
+      WiFi.mode(WIFI_OFF);
+      printToConsole(infoPrefix + "WiFi turned off", TFT_YELLOW);
+    }
+
+    else if (lowCmd == "wifi on") {
+      WiFi.mode(WIFI_STA);
+      printToConsole(infoPrefix + "WiFi turned on. Use 'wifi auto' or 'wifi' to connect", TFT_GREEN);
+    }
+
     else if (lowCmd == "scan" || lowCmd == "wifi-scan" || lowCmd == "networks") {
       wifiScanner();
     }
 
     else if (lowCmd == "wifistatus" || lowCmd == "wifi-status") {
       printWiFiStatus();
-    }
-
-    else if (lowCmd == "wifioff" || lowCmd == "wifi-off") {
-      WiFi.disconnect(true);
-      printToConsole(infoPrefix + "WiFi disconnected", TFT_YELLOW);
     }
 
     else if (lowCmd == "wifiinfo") {
@@ -5935,8 +6048,48 @@ void loop() {
       }
     }
 
-    else if (lowCmd == "autoconnect") {
-      autoConnectWiFi();
+    // ==================== FILE SERVER BEFEHLE ====================
+    else if (lowCmd == "fileserver" || lowCmd == "fs") {
+      if (WiFi.status() != WL_CONNECTED) {
+        printToConsole(errorPrefix + "WiFi not connected! Use 'wifi' or 'wifi auto' first.", TFT_RED);
+      } else {
+        if (!fileServerRunning) {
+          startFileServer();
+        } else {
+          printToConsole(infoPrefix + "File server already running at: http://" + WiFi.localIP().toString() + ":8080", TFT_BLUE);
+        }
+      }
+    }
+
+    else if (lowCmd == "fsstop" || lowCmd == "stopfs") {
+      stopFileServer();
+    }
+
+    else if (lowCmd == "fsstatus") {
+      if (fileServerRunning) {
+        printToConsole(successPrefix + "File server running at: http://" + WiFi.localIP().toString() + ":8080", TFT_GREEN);
+        printToConsole(infoPrefix + "Password: " + adminPassword, TFT_YELLOW);
+      } else {
+        printToConsole(infoPrefix + "File server not running. Use 'fileserver' to start", TFT_YELLOW);
+      }
+    }
+
+    else if (lowCmd.startsWith("setpwd ")) {
+      String newPwd = lowCmd.substring(7);
+      if (newPwd.length() >= 4) {
+        if (saveAdminPassword(newPwd)) {
+          adminPassword = newPwd;
+          printToConsole(successPrefix + "Password changed! New password: " + newPwd, TFT_GREEN);
+        } else {
+          printToConsole(errorPrefix + "Failed to save password", TFT_RED);
+        }
+      } else {
+        printToConsole(errorPrefix + "Password must be at least 4 characters", TFT_RED);
+      }
+    }
+
+    else if (lowCmd == "showpwd") {
+      printToConsole(errorPrefix + "Current admin password: " + adminPassword, TFT_YELLOW);
     }
 
     // ==================== SPIELE & UNTERHALTUNG ====================
@@ -5984,10 +6137,6 @@ void loop() {
       drawingApp();
     }
 
-    else if (lowCmd == "notes") {
-      notesApp();
-    }
-
     else if (lowCmd == "todo") {
       todoApp();
     }
@@ -6006,15 +6155,6 @@ void loop() {
 
     else if (lowCmd == "edit" || lowCmd == "editor" || lowCmd == "nano") {
       textEditor();
-    }
-
-    // ==================== NEUE APPS ====================
-    else if (lowCmd == "calendar" || lowCmd == "kalender") {
-      calendarApp();
-    }
-
-    else if (lowCmd == "periodic" || lowCmd == "ptable" || lowCmd == "elements" || lowCmd == "periodensystem") {
-      periodicTableApp();
     }
 
     else if (lowCmd == "qr" || lowCmd == "qrcode") {
@@ -6075,7 +6215,13 @@ void loop() {
       if (result != "Error") {
         printToConsole(expr + " = " + result, TFT_GREEN);
       } else {
-        printToConsole(errorPrefix + "Cannot evaluate: " + expr, TFT_RED);
+        // Versuche wissenschaftlichen Taschenrechner
+        result = evaluateScientific(expr);
+        if (result != "Error") {
+          printToConsole(expr + " = " + result, TFT_GREEN);
+        } else {
+          printToConsole(errorPrefix + "Cannot evaluate: " + expr, TFT_RED);
+        }
       }
     }
 
@@ -6092,6 +6238,7 @@ void loop() {
 
     // ==================== FILE AUSFÜHREN (Falls Dateiname) ====================
     else {
+      // Prüfen ob es eine Datei ist
       File f = SD.open(cmd);
       if (f) {
         printToConsole("File: " + cmd, TFT_CYAN);
@@ -6102,6 +6249,16 @@ void loop() {
         }
         if (f.available()) printToConsole("... (truncated, use 'cat' for full view)");
         f.close();
+      }
+      // Prüfen ob es ein Ordner ist
+      else if (SD.exists(cmd) && !cmd.endsWith(".txt") && !cmd.endsWith(".ch8")) {
+        std::vector<String> f, d;
+        listDirectory(cmd, f, d);
+        printToConsole("Directory: " + cmd, TFT_CYAN);
+        for (String dir : d) printToConsole("  [DIR]  " + dir, TFT_GREEN);
+        for (String file : f) printToConsole("  [FILE] " + file);
+      } else if (lowCmd == "adpsw" || lowCmd == "adminpass" || lowCmd == "passwd") {
+        adminPasswordApp();
       } else {
         printToConsole(errorPrefix + "Command not found: " + cmd, TFT_RED);
         printToConsole(infoPrefix + "Type 'help' for available commands", TFT_BLUE);
@@ -6111,46 +6268,474 @@ void loop() {
 
     updateInputLine(false);
   }
+  // File Server regelmäßig bedienen
+  handleFileServer();
 }
 
-// ==================== AUTO-CONNECT FUNKTION ====================
+// ==================== ERWEITERTE WIFI AUTO-CONNECT FUNKTION ====================
+// ==================== MIT SPEICHERVERWALTUNG ====================
+
+
+
+// Gespeicherte WLANs aus EEPROM laden
+void loadSavedWiFi() {
+  for (int i = 0; i < MAX_SAVED_WIFIS; i++) {
+    int addr = WIFI_EEPROM_START + (i * 64);
+
+    // SSID lesen
+    String ssid = "";
+    for (int j = 0; j < 32; j++) {
+      char c = EEPROM.read(addr + j);
+      if (c == 0xFF || c == 0x00) break;
+      if (c != 0) ssid += c;
+    }
+
+    // Passwort lesen
+    String pwd = "";
+    for (int j = 0; j < 32; j++) {
+      char c = EEPROM.read(addr + 32 + j);
+      if (c == 0xFF || c == 0x00) break;
+      if (c != 0) pwd += c;
+    }
+
+    if (ssid.length() > 0 && ssid[0] != 0xFF) {
+      savedNetworks[i].ssid = ssid;
+      savedNetworks[i].password = pwd;
+      savedNetworks[i].valid = true;
+    } else {
+      savedNetworks[i].valid = false;
+    }
+  }
+}
+
+// Gespeicherte WLANs in EEPROM speichern
+void saveSavedWiFi() {
+  // EEPROM Bereich löschen (mit 0xFF füllen)
+  for (int i = 0; i < WIFI_EEPROM_SIZE; i++) {
+    EEPROM.write(WIFI_EEPROM_START + i, 0xFF);
+  }
+
+  // WLANs speichern
+  for (int i = 0; i < MAX_SAVED_WIFIS; i++) {
+    if (savedNetworks[i].valid) {
+      int addr = WIFI_EEPROM_START + (i * 64);
+
+      // SSID schreiben
+      for (int j = 0; j < savedNetworks[i].ssid.length() && j < 32; j++) {
+        EEPROM.write(addr + j, savedNetworks[i].ssid[j]);
+      }
+      EEPROM.write(addr + savedNetworks[i].ssid.length(), 0x00);
+
+      // Passwort schreiben
+      for (int j = 0; j < savedNetworks[i].password.length() && j < 32; j++) {
+        EEPROM.write(addr + 32 + j, savedNetworks[i].password[j]);
+      }
+      EEPROM.write(addr + 32 + savedNetworks[i].password.length(), 0x00);
+    }
+  }
+  EEPROM.commit();
+}
+
+// Gespeichertes WLAN hinzufügen oder aktualisieren
+void addSavedWiFi(String ssid, String password) {
+  // Prüfen ob bereits vorhanden
+  for (int i = 0; i < MAX_SAVED_WIFIS; i++) {
+    if (savedNetworks[i].valid && savedNetworks[i].ssid == ssid) {
+      savedNetworks[i].password = password;
+      saveSavedWiFi();
+      printToConsole(successPrefix + "Updated WiFi: " + ssid, TFT_GREEN);
+      return;
+    }
+  }
+
+  // Neuen Eintrag finden
+  for (int i = 0; i < MAX_SAVED_WIFIS; i++) {
+    if (!savedNetworks[i].valid) {
+      savedNetworks[i].ssid = ssid;
+      savedNetworks[i].password = password;
+      savedNetworks[i].valid = true;
+      saveSavedWiFi();
+      printToConsole(successPrefix + "Added WiFi: " + ssid, TFT_GREEN);
+      return;
+    }
+  }
+
+  printToConsole(errorPrefix + "Max saved WiFis reached (" + String(MAX_SAVED_WIFIS) + ")", TFT_RED);
+}
+
+// Gespeichertes WLAN löschen
+void deleteSavedWiFi(String ssid) {
+  for (int i = 0; i < MAX_SAVED_WIFIS; i++) {
+    if (savedNetworks[i].valid && savedNetworks[i].ssid == ssid) {
+      savedNetworks[i].valid = false;
+      savedNetworks[i].ssid = "";
+      savedNetworks[i].password = "";
+      saveSavedWiFi();
+      printToConsole(successPrefix + "Deleted WiFi: " + ssid, TFT_GREEN);
+      return;
+    }
+  }
+  printToConsole(errorPrefix + "WiFi not found: " + ssid, TFT_RED);
+}
+
+// Alle gespeicherten WLANs anzeigen
+void listSavedWiFi() {
+  printToConsole("╔══════════════════════════════════════╗", TFT_CYAN);
+  printToConsole("║     SAVED WIFI NETWORKS              ║", TFT_CYAN);
+  printToConsole("╠══════════════════════════════════════╣", TFT_CYAN);
+
+  int count = 0;
+  for (int i = 0; i < MAX_SAVED_WIFIS; i++) {
+    if (savedNetworks[i].valid) {
+      count++;
+      String pwdDisplay = savedNetworks[i].password;
+      if (pwdDisplay.length() > 0) {
+        pwdDisplay = String(pwdDisplay[0]) + "***" + pwdDisplay.substring(pwdDisplay.length() - 1);
+      }
+      printToConsole("║ " + String(i + 1) + ". " + savedNetworks[i].ssid, TFT_GREEN);
+      printToConsole("║    PWD: " + pwdDisplay, TFT_YELLOW);
+    }
+  }
+
+  if (count == 0) {
+    printToConsole("║   No saved WiFis found               ║", TFT_RED);
+  }
+
+  printToConsole("╚══════════════════════════════════════╝", TFT_CYAN);
+  printToConsole(infoPrefix + String(count) + " network(s) saved (" + String(MAX_SAVED_WIFIS - count) + " slots free)", TFT_BLUE);
+}
+
+// Auto-Connect zu bestem verfügbaren WLAN
 void autoConnectWiFi() {
-  // Gespeicherte Credentials laden
-  String savedSSID = "";
-  String savedPWD = "";
+  loadSavedWiFi();
 
-  for (int i = 0; i < 32; i++) {
-    char c = EEPROM.read(150 + i);
-    if (c == 0xFF) break;
-    if (c != 0) savedSSID += c;
+  // Prüfen ob WLANs gespeichert sind
+  bool hasAny = false;
+  for (int i = 0; i < MAX_SAVED_WIFIS; i++) {
+    if (savedNetworks[i].valid) {
+      hasAny = true;
+      break;
+    }
   }
 
-  for (int i = 0; i < 64; i++) {
-    char c = EEPROM.read(200 + i);
-    if (c == 0xFF) break;
-    if (c != 0) savedPWD += c;
+  if (!hasAny) {
+    printToConsole(infoPrefix + "No saved networks. Use 'wifi add <SSID> <PWD>' or 'scan' to add.", TFT_BLUE);
+    return;
   }
 
-  if (savedSSID.length() > 0 && savedSSID[0] != 0xFF && savedSSID.length() < 32) {
-    printToConsole(infoPrefix + "Auto-connecting to " + savedSSID, TFT_BLUE);
-    WiFi.begin(savedSSID.c_str(), savedPWD.c_str());
+  printToConsole(infoPrefix + "Scanning for available networks...", TFT_BLUE);
+
+  // Scan durchführen
+  int n = WiFi.scanNetworks();
+  if (n == 0) {
+    printToConsole(errorPrefix + "No networks found!", TFT_RED);
+    return;
+  }
+
+  // Bestes Netzwerk aus gespeicherten finden
+  int bestIndex = -1;
+  int bestRSSI = -1000;
+  String bestSSID = "";
+
+  for (int i = 0; i < n; i++) {
+    String ssid = WiFi.SSID(i);
+    int rssi = WiFi.RSSI(i);
+
+    // Prüfen ob in gespeicherten vorhanden
+    for (int j = 0; j < MAX_SAVED_WIFIS; j++) {
+      if (savedNetworks[j].valid && savedNetworks[j].ssid == ssid) {
+        if (rssi > bestRSSI) {
+          bestRSSI = rssi;
+          bestIndex = j;
+          bestSSID = ssid;
+        }
+        break;
+      }
+    }
+  }
+
+  WiFi.scanDelete();
+
+  if (bestIndex >= 0) {
+    printToConsole(infoPrefix + "Connecting to " + bestSSID + " (signal: " + String(bestRSSI) + "dBm)", TFT_BLUE);
+    WiFi.begin(savedNetworks[bestIndex].ssid.c_str(), savedNetworks[bestIndex].password.c_str());
 
     int attempts = 0;
-    while (WiFi.status() != WL_CONNECTED && attempts < 20) {
+    while (WiFi.status() != WL_CONNECTED && attempts < 30) {
       delay(500);
       attempts++;
-      Serial.print(".");
+      if (attempts % 5 == 0) {
+        printToConsole(".", TFT_GREEN);
+      }
     }
 
     if (WiFi.status() == WL_CONNECTED) {
-      printToConsole(successPrefix + "Auto-connected! IP: " + WiFi.localIP().toString(), TFT_GREEN);
+      printToConsole("");
+      printToConsole(successPrefix + "Auto-connected to: " + bestSSID, TFT_GREEN);
+      printToConsole(infoPrefix + "IP: " + WiFi.localIP().toString(), TFT_BLUE);
       initNTP();
     } else {
-      printToConsole(errorPrefix + "Auto-connect failed", TFT_RED);
+      printToConsole("");
+      printToConsole(errorPrefix + "Connection failed!", TFT_RED);
     }
   } else {
-    printToConsole(infoPrefix + "No saved network found. Use 'wifi' or 'scan' first.", TFT_BLUE);
+    printToConsole(errorPrefix + "No saved networks found in range!", TFT_RED);
   }
+}
+
+// WLAN mit Passwort verbinden und speichern
+void connectAndSaveWiFi(String ssid, String password) {
+  printToConsole(infoPrefix + "Connecting to " + ssid + "...", TFT_BLUE);
+  WiFi.begin(ssid.c_str(), password.c_str());
+
+  int attempts = 0;
+  while (WiFi.status() != WL_CONNECTED && attempts < 30) {
+    delay(500);
+    attempts++;
+    if (attempts % 5 == 0) {
+      printToConsole(".", TFT_GREEN);
+    }
+  }
+
+  if (WiFi.status() == WL_CONNECTED) {
+    printToConsole("");
+    printToConsole(successPrefix + "Connected to: " + ssid, TFT_GREEN);
+    printToConsole(infoPrefix + "IP: " + WiFi.localIP().toString(), TFT_BLUE);
+
+    // In gespeicherte Liste aufnehmen
+    addSavedWiFi(ssid, password);
+    initNTP();
+  } else {
+    printToConsole("");
+    printToConsole(errorPrefix + "Connection failed!", TFT_RED);
+  }
+}
+
+// ==================== WIFI MANAGER MIT SPEICHERVERWALTUNG ====================
+
+void wifiManagerEnhanced() {
+  int oldKbMode = kbMode;
+  String oldInput = currentInput;
+
+  loadSavedWiFi();
+
+  tft.fillScreen(BG_COLOR);
+  bool running = true;
+  int selected = 0;
+  int scrollOffset = 0;
+  int maxVisible = 8;
+
+  while (running) {
+    tft.fillRect(0, 35, 240, 285, BG_COLOR);
+
+    // Header
+    tft.fillRect(0, 35, 240, 30, ACCENT_COLOR);
+    tft.setTextColor(TFT_WHITE);
+    tft.setTextSize(2);
+    tft.drawCentreString("WIFI MANAGER", 120, 42, 2);
+
+    // Buttons
+    tft.fillRoundRect(5, 5, 55, 25, 4, SUCCESS_COLOR);
+    tft.drawCentreString("SCAN", 32, 12, 1);
+
+    tft.fillRoundRect(65, 5, 55, 25, 4, TFT_BLUE);
+    tft.drawCentreString("ADD", 92, 12, 1);
+
+    tft.fillRoundRect(125, 5, 55, 25, 4, WARNING_COLOR);
+    tft.drawCentreString("DEL", 152, 12, 1);
+
+    tft.fillRoundRect(185, 5, 50, 25, 4, WARNING_COLOR);
+    tft.drawCentreString("ESC", 210, 12, 1);
+
+    // Gespeicherte Netzwerke anzeigen
+    tft.setTextSize(1);
+    tft.setTextColor(TFT_CYAN);
+    tft.setCursor(10, 70);
+    tft.print("Saved Networks:");
+
+    int y = 85;
+    int visibleCount = 0;
+
+    for (int i = 0; i < MAX_SAVED_WIFIS && visibleCount < maxVisible; i++) {
+      if (savedNetworks[i].valid) {
+        if (selected == i) {
+          tft.fillRoundRect(5, y - 2, 230, 20, 3, ACCENT_COLOR);
+          tft.setTextColor(TFT_WHITE);
+        } else {
+          tft.setTextColor(TEXT_COLOR);
+        }
+
+        tft.setCursor(10, y);
+        tft.print(String(visibleCount + 1) + ". " + savedNetworks[i].ssid);
+
+        // Signalstärke anzeigen (falls verbunden)
+        if (WiFi.status() == WL_CONNECTED && WiFi.SSID() == savedNetworks[i].ssid) {
+          tft.setTextColor(TFT_GREEN);
+          tft.setCursor(180, y);
+          tft.print("● CONNECTED");
+        }
+
+        y += 22;
+        visibleCount++;
+      }
+    }
+
+    if (visibleCount == 0) {
+      tft.setTextColor(TFT_RED);
+      tft.setCursor(10, 100);
+      tft.print("  No saved networks");
+      tft.setTextColor(TFT_YELLOW);
+      tft.setCursor(10, 120);
+      tft.print("  Use SCAN to find networks");
+      tft.setCursor(10, 135);
+      tft.print("  or ADD to manually enter");
+    }
+
+    // Status anzeigen
+    tft.setTextSize(1);
+    if (WiFi.status() == WL_CONNECTED) {
+      tft.setTextColor(TFT_GREEN);
+      tft.setCursor(10, 300);
+      tft.print("WiFi: " + WiFi.SSID() + " (" + String(WiFi.RSSI()) + "dBm)");
+    } else {
+      tft.setTextColor(TFT_RED);
+      tft.setCursor(10, 300);
+      tft.print("WiFi: Disconnected");
+    }
+
+    int tx, ty;
+    if (getTouch(tx, ty)) {
+      // ESC Button
+      if (tx > 185 && ty < 35) {
+        running = false;
+      }
+      // SCAN Button
+      else if (tx < 60 && ty < 35) {
+        playSysSound(0);
+        wifiScanner();
+        loadSavedWiFi();  // Neu laden nach Scan
+        tft.fillScreen(BG_COLOR);
+      }
+      // ADD Button
+      else if (tx > 60 && tx < 120 && ty < 35) {
+        playSysSound(0);
+        printToConsole(infoPrefix + "Enter SSID:", TFT_BLUE);
+        String ssid = getTextInput();
+        if (ssid != "") {
+          printToConsole(infoPrefix + "Enter Password (or leave empty for open network):", TFT_BLUE);
+          String pwd = getTextInput();
+          connectAndSaveWiFi(ssid, pwd);
+          loadSavedWiFi();
+        }
+        tft.fillScreen(BG_COLOR);
+      }
+      // DEL Button
+      else if (tx > 120 && tx < 180 && ty < 35) {
+        playSysSound(0);
+        if (visibleCount > 0) {
+          // Aktuell ausgewähltes löschen
+          int deleteIndex = -1;
+          int counter = 0;
+          for (int i = 0; i < MAX_SAVED_WIFIS; i++) {
+            if (savedNetworks[i].valid) {
+              if (counter == selected) {
+                deleteIndex = i;
+                break;
+              }
+              counter++;
+            }
+          }
+          if (deleteIndex >= 0) {
+            if (WiFi.status() == WL_CONNECTED && WiFi.SSID() == savedNetworks[deleteIndex].ssid) {
+              WiFi.disconnect();
+            }
+            deleteSavedWiFi(savedNetworks[deleteIndex].ssid);
+            loadSavedWiFi();
+            selected = 0;
+          }
+        }
+        tft.fillScreen(BG_COLOR);
+      }
+      // Netzwerk auswählen
+      else if (ty > 80 && ty < 260 && visibleCount > 0) {
+        int idx = (ty - 80) / 22;
+        if (idx >= 0 && idx < visibleCount) {
+          // Index in echten Array-Index umwandeln
+          int realIdx = -1;
+          int counter = 0;
+          for (int i = 0; i < MAX_SAVED_WIFIS; i++) {
+            if (savedNetworks[i].valid) {
+              if (counter == idx) {
+                realIdx = i;
+                break;
+              }
+              counter++;
+            }
+          }
+          if (realIdx >= 0) {
+            selected = realIdx;
+            playSysSound(0);
+
+            // Verbinden zu ausgewähltem Netzwerk
+            printToConsole(infoPrefix + "Connecting to " + savedNetworks[realIdx].ssid + "...", TFT_BLUE);
+            WiFi.begin(savedNetworks[realIdx].ssid.c_str(), savedNetworks[realIdx].password.c_str());
+
+            int attempts = 0;
+            while (WiFi.status() != WL_CONNECTED && attempts < 20) {
+              delay(500);
+              attempts++;
+              tft.fillCircle(120 + (attempts % 5) * 10, 280, 2, SUCCESS_COLOR);
+            }
+
+            if (WiFi.status() == WL_CONNECTED) {
+              printToConsole(successPrefix + "Connected! IP: " + WiFi.localIP().toString(), TFT_GREEN);
+              initNTP();
+            } else {
+              printToConsole(errorPrefix + "Connection failed!", TFT_RED);
+            }
+
+            delay(1000);
+            tft.fillScreen(BG_COLOR);
+          }
+        }
+      }
+    }
+    delay(50);
+  }
+
+  kbMode = oldKbMode;
+  currentInput = oldInput;
+  tft.fillScreen(BG_COLOR);
+  drawKeyboard();
+  drawScrollButtons();
+  refreshTerminal();
+  updateInputLine(true);
+}
+
+
+// Hilfsfunktion für Bestätigung
+bool confirmAction(String message) {
+  printToConsole(message + " (y/n):", TFT_YELLOW);
+
+  unsigned long startTime = millis();
+  while (millis() - startTime < 5000) {
+    int tx, ty;
+    if (getTouch(tx, ty)) {
+      // Hier könnte man Touch-Buttons für Yes/No implementieren
+      // Für jetzt: Einfach Yes annehmen
+      return true;
+    }
+
+    // Tastatureingabe abfragen
+    String input = handleKeyboardInput();
+    if (input != "") {
+      input.toLowerCase();
+      if (input == "y" || input == "yes") return true;
+      if (input == "n" || input == "no") return false;
+    }
+    delay(50);
+  }
+  return false;
 }
 
 // ==================== WIFI STATUS DETAILS ====================
@@ -6181,4 +6766,341 @@ void printWiFiStatus() {
     printToConsole(errorPrefix + "WiFi not connected!", TFT_RED);
     printToConsole(infoPrefix + "Use 'scan' to find networks or 'wifi' to connect", TFT_BLUE);
   }
+}
+
+// ==================== ADMIN PASSWORT MANAGER APP ====================
+// ==================== BEFEHL: adpsw ====================
+
+void adminPasswordApp() {
+  int oldKbMode = kbMode;
+  String oldInput = currentInput;
+
+  tft.fillScreen(BG_COLOR);
+
+  bool running = true;
+  String currentPwd = adminPassword;
+  String newPwd = "";
+  String confirmPwd = "";
+  int step = 0;  // 0=zeige aktuell, 1=neues Passwort, 2=bestätigen
+
+  // Caesar Verschlüsselungsparameter
+  const int SHIFT_RIGHT = 12;
+  const int SHIFT_LEFT = 14;
+
+  while (running) {
+    tft.fillRect(0, 35, 240, 285, BG_COLOR);
+
+    // Header
+    tft.fillRect(0, 35, 240, 35, ACCENT_COLOR);
+    tft.setTextColor(TFT_WHITE);
+    tft.setTextSize(2);
+    tft.drawCentreString("ADMIN PASSWORD", 120, 42, 2);
+    tft.setTextSize(1);
+    tft.drawCentreString("File Server Access", 120, 62, 1);
+
+    // ESC Button
+    tft.fillRoundRect(180, 5, 55, 25, 4, WARNING_COLOR);
+    tft.drawCentreString("ESC", 207, 10, 2);
+
+    // Passwort Anzeige Bereich
+    tft.fillRoundRect(10, 85, 220, 120, 5, BUTTON_COLOR);
+    tft.drawRect(10, 85, 220, 120, TEXT_COLOR);
+
+    tft.setTextSize(1);
+
+    // Aktuelles Passwort anzeigen (maskiert)
+    tft.setTextColor(TFT_CYAN);
+    tft.setCursor(20, 105);
+    tft.print("Current Password:");
+    tft.setTextColor(TEXT_COLOR);
+    tft.setCursor(20, 120);
+    String masked = "";
+    for (int i = 0; i < currentPwd.length(); i++) {
+      masked += "•";
+    }
+    tft.print(masked + " (" + String(currentPwd.length()) + " chars)");
+
+    // Neues Passwort eingeben
+    tft.setTextColor(TFT_CYAN);
+    tft.setCursor(20, 150);
+    tft.print("New Password:");
+    tft.setTextColor(TEXT_COLOR);
+    tft.setCursor(20, 165);
+
+    if (step == 1) {
+      // Eingabefeld für neues Passwort
+      tft.fillRoundRect(18, 160, 204, 20, 3, TFT_DARKGREY);
+      tft.setCursor(22, 165);
+      String displayPwd = newPwd;
+      if (displayPwd.length() > 25) displayPwd = displayPwd.substring(0, 22) + "...";
+      tft.print(displayPwd);
+      if ((millis() / 500) % 2 == 0) {
+        tft.print("_");
+      }
+    } else if (step == 2) {
+      // Bestätigungsfeld
+      tft.fillRoundRect(18, 160, 204, 20, 3, TFT_DARKGREY);
+      tft.setCursor(22, 165);
+      String displayPwd = confirmPwd;
+      if (displayPwd.length() > 25) displayPwd = displayPwd.substring(0, 22) + "...";
+      tft.print(displayPwd);
+      if ((millis() / 500) % 2 == 0) {
+        tft.print("_");
+      }
+    } else {
+      tft.print("Click 'Change' to set new password");
+    }
+
+    // Buttons
+    tft.fillRoundRect(10, 220, 70, 35, 4, SUCCESS_COLOR);
+    tft.drawCentreString("CHANGE", 45, 232, 1);
+
+    tft.fillRoundRect(85, 220, 70, 35, 4, TFT_BLUE);
+    tft.drawCentreString("SHOW", 120, 232, 1);
+
+    tft.fillRoundRect(160, 220, 70, 35, 4, TFT_PURPLE);
+    tft.drawCentreString("GEN", 195, 232, 1);
+
+    // Status/Info Bereich
+    tft.fillRoundRect(10, 265, 220, 50, 5, TFT_DARKGREY);
+    tft.setTextColor(TFT_YELLOW);
+    tft.setCursor(20, 278);
+    tft.print("📌 Password must be 4-20 chars");
+    tft.setCursor(20, 293);
+    tft.print("🔐 Encrypted with Caesar cipher");
+
+    int tx, ty;
+    if (getTouch(tx, ty)) {
+      // ESC Button
+      if (tx > 180 && ty < 40) {
+        if (step > 0) {
+          // Zurücksetzen bei Abbruch
+          step = 0;
+          newPwd = "";
+          confirmPwd = "";
+          tft.fillScreen(BG_COLOR);
+        } else {
+          running = false;
+        }
+        playSysSound(0);
+      }
+      // CHANGE Button
+      else if (tx > 10 && tx < 80 && ty > 220 && ty < 255) {
+        playSysSound(0);
+        if (step == 0) {
+          step = 1;
+          newPwd = "";
+          tft.fillScreen(BG_COLOR);
+        } else if (step == 1) {
+          step = 2;
+          tft.fillScreen(BG_COLOR);
+        } else if (step == 2) {
+          // Passwort ändern
+          if (newPwd == confirmPwd && newPwd.length() >= 4 && newPwd.length() <= 20) {
+            if (saveAdminPassword(newPwd)) {
+              adminPassword = newPwd;
+              currentPwd = newPwd;
+              printToConsole(successPrefix + "Password changed successfully!", TFT_GREEN);
+              printToConsole(infoPrefix + "New password: " + newPwd, TFT_YELLOW);
+              playSysSound(1);
+              step = 0;
+              newPwd = "";
+              confirmPwd = "";
+            } else {
+              printToConsole(errorPrefix + "Failed to save password!", TFT_RED);
+              playSysSound(3);
+            }
+          } else if (newPwd != confirmPwd) {
+            printToConsole(errorPrefix + "Passwords do not match!", TFT_RED);
+            playSysSound(3);
+            step = 1;
+            newPwd = "";
+          } else if (newPwd.length() < 4) {
+            printToConsole(errorPrefix + "Password too short! Min 4 chars", TFT_RED);
+            playSysSound(3);
+          } else if (newPwd.length() > 20) {
+            printToConsole(errorPrefix + "Password too long! Max 20 chars", TFT_RED);
+            playSysSound(3);
+          }
+          tft.fillScreen(BG_COLOR);
+        }
+      }
+      // SHOW Button (aktuelles Passwort anzeigen)
+      else if (tx > 85 && tx < 155 && ty > 220 && ty < 255) {
+        playSysSound(0);
+        printToConsole(errorPrefix + "Current admin password: " + adminPassword, TFT_YELLOW);
+        printToConsole(infoPrefix + "Password is stored encrypted on SD card", TFT_BLUE);
+        delay(1500);
+      }
+      // GEN Button (Passwort generieren)
+      else if (tx > 160 && tx < 230 && ty > 220 && ty < 255) {
+        playSysSound(0);
+        // Sicheres Passwort generieren
+        const char* chars = "ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz23456789!@#$%";
+        String generated = "";
+        randomSeed(millis());
+        for (int i = 0; i < 10; i++) {
+          generated += chars[random(strlen(chars))];
+        }
+
+        if (step == 1) {
+          newPwd = generated;
+        } else if (step == 2) {
+          confirmPwd = generated;
+        } else {
+          // Im Hauptmenü: Neues Passwort vorschlagen
+          step = 1;
+          newPwd = generated;
+        }
+        printToConsole(infoPrefix + "Generated password: " + generated, TFT_GREEN);
+        tft.fillScreen(BG_COLOR);
+      }
+    }
+
+    // Tastatureingabe für Passwortfelder
+    if (step == 1 || step == 2) {
+      String input = handleKeyboardInput();
+      if (input != "" && input != "ESC_SIGNAL") {
+        if (step == 1) {
+          newPwd = input;
+          if (newPwd.length() > 20) newPwd = newPwd.substring(0, 20);
+        } else if (step == 2) {
+          confirmPwd = input;
+          if (confirmPwd.length() > 20) confirmPwd = confirmPwd.substring(0, 20);
+        }
+        tft.fillScreen(BG_COLOR);
+        playSysSound(0);
+      } else if (input == "ESC_SIGNAL") {
+        step = 0;
+        newPwd = "";
+        confirmPwd = "";
+        tft.fillScreen(BG_COLOR);
+      }
+    }
+
+    delay(20);
+  }
+
+  kbMode = oldKbMode;
+  currentInput = oldInput;
+  tft.fillScreen(BG_COLOR);
+  drawKeyboard();
+  drawScrollButtons();
+  refreshTerminal();
+  updateInputLine(true);
+}
+
+// ==================== VERBESSERTE saveAdminPassword FUNKTION ====================
+// Ersetze die alte Funktion mit dieser:
+
+bool saveAdminPassword(String password) {
+  // Passwort mit Caesar verschlüsseln
+  String encrypted = caesarEncrypt(password, 12, 14);
+
+  File pwdFile = SD.open("/psw_admin.txt", FILE_WRITE);
+  if (!pwdFile) {
+    Serial.println("ERROR: Cannot open psw_admin.txt for writing");
+    return false;
+  }
+
+  pwdFile.print(encrypted);
+  pwdFile.close();
+
+  Serial.println("Password saved encrypted to /psw_admin.txt");
+  return true;
+}
+
+// ==================== VERBESSERTE loadAdminPassword FUNKTION ====================
+// Ersetze die alte Funktion mit dieser:
+
+String loadAdminPassword() {
+  File pwdFile = SD.open("/psw_admin.txt", FILE_READ);
+  if (!pwdFile) {
+    Serial.println("WARNING: psw_admin.txt not found, creating default");
+    // Default Passwort erstellen
+    String defaultPwd = "admin123";
+    saveAdminPassword(defaultPwd);
+    return defaultPwd;
+  }
+
+  String encryptedPwd = "";
+  while (pwdFile.available()) {
+    encryptedPwd += (char)pwdFile.read();
+  }
+  pwdFile.close();
+
+  encryptedPwd.trim();
+
+  // Entschlüsseln
+  String decrypted = caesarDecrypt(encryptedPwd, 12, 14);
+
+  Serial.print("Loaded password (encrypted): ");
+  Serial.println(encryptedPwd);
+  Serial.print("Decrypted: ");
+  Serial.println(decrypted);
+
+  return decrypted;
+}
+
+// ==================== CAESAR FUNKTIONEN (korrigiert) ====================
+
+String caesarEncrypt(String input, int shiftRight, int shiftLeft) {
+  String output = "";
+  int len = input.length();
+  int halfLen = (len + 1) / 2;  // Aufgerundete Mitte
+
+  for (int i = 0; i < len; i++) {
+    char c = input[i];
+    int shift;
+
+    // Erste Hälfte: shift nach rechts (positiv)
+    if (i < halfLen) {
+      shift = shiftRight;
+    }
+    // Zweite Hälfte: shift nach links (negativ)
+    else {
+      shift = -shiftLeft;
+    }
+
+    // Buchstaben verschieben
+    if (c >= 'A' && c <= 'Z') {
+      c = ((c - 'A' + shift) % 26 + 26) % 26 + 'A';
+    } else if (c >= 'a' && c <= 'z') {
+      c = ((c - 'a' + shift) % 26 + 26) % 26 + 'a';
+    }
+    // Zahlen und Sonderzeichen bleiben unverändert
+    else {
+      // Bleibt wie ist
+    }
+
+    output += c;
+  }
+  return output;
+}
+
+String caesarDecrypt(String input, int shiftRight, int shiftLeft) {
+  // Entschlüsselung = gleiche Methode mit umgekehrten Shifts
+  String output = "";
+  int len = input.length();
+  int halfLen = (len + 1) / 2;
+
+  for (int i = 0; i < len; i++) {
+    char c = input[i];
+    int shift;
+
+    if (i < halfLen) {
+      shift = -shiftRight;  // Rückwärts
+    } else {
+      shift = shiftLeft;  // Rückwärts (weil original -shiftLeft war)
+    }
+
+    if (c >= 'A' && c <= 'Z') {
+      c = ((c - 'A' + shift) % 26 + 26) % 26 + 'A';
+    } else if (c >= 'a' && c <= 'z') {
+      c = ((c - 'a' + shift) % 26 + 26) % 26 + 'a';
+    }
+
+    output += c;
+  }
+  return output;
 }
