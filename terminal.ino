@@ -23,11 +23,6 @@ struct SavedWiFi {
 
 SavedWiFi savedNetworks[MAX_SAVED_WIFIS];
 
-struct CalendarNote {
-  int year, month, day;
-  String note;
-  bool hasNote;
-};
 
 #define I2C_SCL 39
 #define I2C_SDA 16
@@ -61,7 +56,7 @@ uint16_t SUCCESS_COLOR = TFT_GREEN;
 bool darkMode = false;
 
 // ==================== SYSTEM SETTINGS ====================
-#define MAX_HISTORY 40
+#define MAX_HISTORY 200
 #define VISIBLE_LINES 9
 std::vector<String> terminalHistory;
 int scrollOffset = 0;
@@ -530,9 +525,7 @@ void fileManager();
 void settingsMenu();
 void snakeGame();
 void pongGame();
-void ticTacToe();
 void drawingApp();
-void todoApp();
 void timerApp();
 void chatApp(bool isHost);
 void wifiManager();
@@ -3139,107 +3132,7 @@ void computerMove() {
   }
 }
 
-void ticTacToe() {
-  int oldKbMode = kbMode;
-  String oldInput = currentInput;
 
-  tft.fillRect(0, 35, 240, 285, BG_COLOR);
-
-  // Init board
-  for (int i = 0; i < 3; i++)
-    for (int j = 0; j < 3; j++)
-      tttBoard[i][j] = ' ';
-
-  playerTurn = true;
-  bool gameActive = true;
-  String message = "Your turn (X)";
-
-  // Draw grid
-  tft.drawLine(80, 80, 80, 240, TEXT_COLOR);
-  tft.drawLine(160, 80, 160, 240, TEXT_COLOR);
-  tft.drawLine(10, 140, 230, 140, TEXT_COLOR);
-  tft.drawLine(10, 200, 230, 200, TEXT_COLOR);
-
-  while (gameActive) {
-    // Draw board
-    for (int i = 0; i < 3; i++) {
-      for (int j = 0; j < 3; j++) {
-        if (tttBoard[i][j] != ' ') {
-          tft.setTextSize(4);
-          tft.setTextColor(TEXT_COLOR);
-          tft.drawCentreString(String(tttBoard[i][j]), i * 80 + 40, j * 60 + 100, 4);
-        }
-      }
-    }
-
-    // Draw message
-    tft.fillRect(10, 250, 220, 30, BG_COLOR);
-    tft.setTextSize(1);
-    tft.setTextColor(ACCENT_COLOR);
-    tft.setCursor(10, 260);
-    tft.print(message);
-
-    // ESC button
-    tft.fillRoundRect(180, 5, 55, 25, 4, WARNING_COLOR);
-    tft.drawCentreString("ESC", 207, 10, 2);
-
-    int tx, ty;
-    if (getTouch(tx, ty)) {
-      if (tx > 180 && ty < 40) {
-        gameActive = false;
-      }
-
-      if (playerTurn && tx < 240 && ty > 80 && ty < 240) {
-        int x = tx / 80;
-        int y = (ty - 80) / 60;
-
-        if (x >= 0 && x < 3 && y >= 0 && y < 3 && tttBoard[x][y] == ' ') {
-          tttBoard[x][y] = 'X';
-          tft.drawCentreString("X", x * 80 + 40, y * 60 + 100, 4);
-          playerTurn = false;
-
-          if (checkWin('X')) {
-            message = "You win!";
-            gameActive = false;
-            printToConsole(successPrefix + "You won at Tic Tac Toe!", TFT_GREEN);
-          } else if (checkDraw()) {
-            message = "Draw!";
-            gameActive = false;
-            printToConsole(infoPrefix + "Tic Tac Toe - Draw!", TFT_YELLOW);
-          } else {
-            message = "Computer thinking...";
-            delay(500);
-            computerMove();
-            playerTurn = true;
-
-            if (checkWin('O')) {
-              message = "Computer wins!";
-              gameActive = false;
-              printToConsole(errorPrefix + "Computer won!", TFT_RED);
-            } else if (checkDraw()) {
-              message = "Draw!";
-              gameActive = false;
-            } else {
-              message = "Your turn (X)";
-            }
-          }
-          playSysSound(0);
-        }
-      }
-    }
-    delay(50);
-  }
-
-  delay(1500);
-
-  kbMode = oldKbMode;
-  currentInput = oldInput;
-  tft.fillScreen(BG_COLOR);
-  drawKeyboard();
-  drawScrollButtons();
-  refreshTerminal();
-  updateInputLine(true);
-}
 void drawingApp() {
   int oldKbMode = kbMode;
   String oldInput = currentInput;
@@ -3535,122 +3428,6 @@ void drawingApp() {
 }
 
 
-
-
-
-
-
-void todoApp() {
-  int oldKbMode = kbMode;
-  String oldInput = currentInput;
-
-  tft.fillRect(0, 35, 240, 285, BG_COLOR);
-
-  std::vector<String> todos;
-  std::vector<bool> done;
-
-  // Load todos
-  File f = SD.open("/todos.txt", FILE_READ);
-  if (f) {
-    while (f.available()) {
-      String line = f.readStringUntil('\n');
-      if (line.startsWith("[D]")) {
-        done.push_back(true);
-        todos.push_back(line.substring(3));
-      } else if (line.length() > 0) {
-        done.push_back(false);
-        todos.push_back(line);
-      }
-    }
-    f.close();
-  }
-
-  bool running = true;
-  int selected = -1;
-
-  while (running) {
-    tft.fillRect(0, 35, 240, 285, BG_COLOR);
-
-    tft.setTextSize(1);
-    tft.setTextColor(TEXT_COLOR);
-
-    for (int i = 0; i < min(8, (int)todos.size()); i++) {
-      int y = 45 + i * 25;
-      if (i == selected) {
-        tft.fillRoundRect(10, y - 2, 220, 22, 3, ACCENT_COLOR);
-        tft.setTextColor(TFT_WHITE);
-      } else {
-        tft.fillRoundRect(10, y - 2, 220, 22, 3, BUTTON_COLOR);
-        tft.setTextColor(TEXT_COLOR);
-      }
-
-      String prefix = done[i] ? "✓ " : "☐ ";
-      String display = prefix + todos[i];
-      if (display.length() > 27) display = display.substring(0, 24) + "...";
-      tft.setCursor(15, y);
-      tft.print(display);
-    }
-
-    if (todos.size() == 0) {
-      tft.drawCentreString("No tasks. Press ADD to create", 120, 100, 1);
-    }
-
-    // Buttons
-    tft.fillRoundRect(10, 265, 55, 25, 4, SUCCESS_COLOR);
-    tft.drawCentreString("ADD", 37, 274, 1);
-    tft.fillRoundRect(70, 265, 55, 25, 4, WARNING_COLOR);
-    tft.drawCentreString("DEL", 97, 274, 1);
-    tft.fillRoundRect(130, 265, 55, 25, 4, TFT_BLUE);
-    tft.drawCentreString("TOGGLE", 157, 274, 1);
-    tft.fillRoundRect(190, 265, 45, 25, 4, WARNING_COLOR);
-    tft.drawCentreString("ESC", 212, 274, 1);
-
-    int tx, ty;
-    if (getTouch(tx, ty)) {
-      if (tx > 190 && ty > 265 && ty < 290) {
-        running = false;
-      } else if (ty > 265 && ty < 290) {
-        if (tx < 65) {  // ADD
-          printToConsole(infoPrefix + "New todo:", TFT_BLUE);
-          String newTodo = getTextInput();
-          if (newTodo != "") {
-            todos.push_back(newTodo);
-            done.push_back(false);
-          }
-        } else if (tx < 125 && selected >= 0) {  // DEL
-          todos.erase(todos.begin() + selected);
-          done.erase(done.begin() + selected);
-          selected = -1;
-        } else if (tx < 185 && selected >= 0) {  // TOGGLE
-          done[selected] = !done[selected];
-        }
-      } else if (ty > 40 && ty < 250) {
-        selected = (ty - 40) / 25;
-        if (selected >= (int)todos.size()) selected = -1;
-        playSysSound(0);
-      }
-    }
-    delay(50);
-  }
-
-  // Save todos
-  f = SD.open("/todos.txt", FILE_WRITE);
-  if (f) {
-    for (int i = 0; i < (int)todos.size(); i++) {
-      if (done[i]) f.println("[D]" + todos[i]);
-      else f.println(todos[i]);
-    }
-    f.close();
-  }
-
-  kbMode = oldKbMode;
-  currentInput = oldInput;
-  tft.fillScreen(BG_COLOR);
-  drawKeyboard();
-  drawScrollButtons();
-  refreshTerminal();
-  updateInputLine(true);
-}
 
 void timerApp() {
   int oldKbMode = kbMode;
@@ -6116,10 +5893,6 @@ void loop() {
       pongGame();
     }
 
-    else if (lowCmd == "tictac" || lowCmd == "ttt") {
-      ticTacToe();
-    }
-
     // ==================== APPLIKATIONEN ====================
     else if (lowCmd == "chip8" || lowCmd == "chip-8") {
       chip8Emulator();
@@ -6137,9 +5910,7 @@ void loop() {
       drawingApp();
     }
 
-    else if (lowCmd == "todo") {
-      todoApp();
-    }
+    
 
     else if (lowCmd == "timer") {
       timerApp();
